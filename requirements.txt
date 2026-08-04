@@ -1,0 +1,10 @@
+streamlit
+requests
+pandas
+altair
+folium
+streamlit-folium
+ephem
+jinja2
+plotly
+google-genai
