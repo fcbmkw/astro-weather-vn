@@ -1900,11 +1900,16 @@ st.markdown(
         line-height: 24px !important;
         resize: none !important;
         overflow: hidden !important;
+        white-space: nowrap !important;
+        text-overflow: ellipsis !important;
     }
 
     div[data-testid="stChatInput"] textarea::placeholder {
         color: #888888 !important;
         opacity: 0.8 !important;
+        white-space: nowrap !important;
+        overflow: hidden !important;
+        text-overflow: ellipsis !important;
     }
 
     div[data-testid="stChatInput"] button {
