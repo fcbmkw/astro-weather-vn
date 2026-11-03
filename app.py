@@ -564,11 +564,12 @@ def _wx_prefetch_store():
     """Kho dùng chung giữa các lần rerun: data = kết quả đã tải sẵn, at = thời điểm tải (epoch giây)."""
     return {"data": {}, "at": {}}
 
-def _wx_prefetch(coords, workers=8):
+def _wx_prefetch(coords, workers=8, budget=25):
     """Tải song song thời tiết cho nhiều toạ độ (chỉ requests thuần, không đụng streamlit trong thread).
-    Kết quả để trong kho; _fetch_weather_raw (có cache) sẽ lấy ra dùng -> cache vẫn ghi ở thread chính."""
+    Kết quả để trong kho; _fetch_weather_raw (có cache) sẽ lấy ra dùng -> cache vẫn ghi ở thread chính.
+    Có giới hạn thời gian (budget, giây): quá hạn thì bỏ qua phần chưa xong, KHÔNG làm treo trang."""
     import time as _t
-    from concurrent.futures import ThreadPoolExecutor
+    from concurrent.futures import ThreadPoolExecutor, wait
     store = _wx_prefetch_store()
     now = _t.time()
     todo = [c for c in dict.fromkeys(coords) if now - store["at"].get(c, 0) > 3300]
@@ -576,14 +577,21 @@ def _wx_prefetch(coords, workers=8):
         return
     def one(c):
         try:
-            return c, _fetch_weather_raw_impl(c[0], c[1])
+            return c, _fetch_weather_raw_impl(c[0], c[1], fast=True)
         except Exception:
             return c, None
-    with ThreadPoolExecutor(max_workers=workers) as ex:
-        for c, res in ex.map(one, todo):
-            if res and res[2] != "offline":      # lỗi thì để _fetch_weather_raw tự thử lại
-                store["data"][c] = res
-                store["at"][c] = now
+    ex = ThreadPoolExecutor(max_workers=workers)
+    futs = [ex.submit(one, c) for c in todo]
+    done, _pending = wait(futs, timeout=budget)
+    ex.shutdown(wait=False, cancel_futures=True)      # luồng đang chạy tự kết thúc theo timeout của requests
+    for f in done:
+        try:
+            c, res = f.result()
+        except Exception:
+            continue
+        if res and res[2] != "offline":      # lỗi thì bỏ qua điểm này
+            store["data"][c] = res
+            store["at"][c] = now
 
 @st.cache_data(ttl=3600, show_spinner=False)
 def _fetch_weather_raw(lat, lon):
@@ -592,7 +600,7 @@ def _fetch_weather_raw(lat, lon):
         return pre
     return _fetch_weather_raw_impl(lat, lon)
 
-def _fetch_weather_raw_impl(lat, lon):
+def _fetch_weather_raw_impl(lat, lon, fast=False):
     """Raw API fetch với retry + multi-endpoint fallback.
     Returns (hourly_dict, utc_offset_seconds, endpoint_used_label, last_error)"""
     import time as _time
@@ -601,10 +609,11 @@ def _fetch_weather_raw_impl(lat, lon):
     last_error = None
     for ep_label, ep_suffix in _ENDPOINTS:
         url = base + ep_suffix
-        for attempt in range(3):   # 3 lần thử mỗi endpoint (network có thể chập chờn)
+        for attempt in range(1 if fast else 3):   # 3 lần thử mỗi endpoint (fast: chỉ 1 lần)
             try:
                 # Multi-model request (full) nặng hơn, cần timeout dài hơn
                 _timeout = 12 if ep_label != "gfs_only" else 8
+                if fast: _timeout = 8
                 res = requests.get(url, headers=headers, timeout=_timeout)
                 if res.status_code == 200:
                     j = res.json()
@@ -4055,6 +4064,8 @@ with col_right:
     # ── TODAY HIGHLIGHT — thay vị trí 7-DAY FORECAST cũ (cùng kích thước) ─────
     # Mỗi vùng: liệt kê các địa điểm có thời tiết đêm nay OK (PERFECT / GOOD STARRY NIGHT).
     # Không có địa điểm nào → ghi "None" (xám). Muốn thêm/bớt vùng chỉ cần sửa _TH_REGIONS.
+    _TH_ENABLED = True    # đặt False để tắt hẳn Today Highlight (không tải thời tiết thêm)
+    _TH_TIME_BUDGET = 40  # giây: tổng thời gian tối đa dành cho Today Highlight
     _TH_REGIONS = ["bac", "trung", "nam"]
     _TH_LABELS  = {"bac": "North", "trung": "Central", "nam": "South"}
     _TH_MAX_SHOW = 2   # số địa điểm hiển thị tối đa mỗi vùng (còn lại gộp thành +N)
@@ -4068,12 +4079,19 @@ with col_right:
         """{region: [(short_name, full_name, tier), ...]} — PERFECT trước, GOOD sau.
         Chạy tuần tự (không thread) vì @st.cache_data không thread-safe khi write.
         Dùng danh sách dedupe 60km; weather fetch đã cache 1h."""
+        import time as _t
         out = {}
+        if not _TH_ENABLED:
+            return out
+        _t0 = _t.time()
         _wx_prefetch([(la, lo) for rk in _TH_REGIONS
                       for _nm, (la, lo) in _locs_for_region(rk, for_best_or_tonight=True)])
+        _ok = _wx_prefetch_store()["at"]       # chỉ tính các điểm đã tải được thời tiết (tránh tải lại chậm)
         for rk in _TH_REGIONS:
             hits = []
             for nm, (la, lo) in _locs_for_region(rk, for_best_or_tonight=True):
+                if (la, lo) not in _ok or _t.time() - _t0 > _TH_TIME_BUDGET:
+                    continue
                 res = _night_verdict_for_single_loc(la, lo, day_off=0)
                 if not res:
                     continue
