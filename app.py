@@ -186,7 +186,7 @@ for k, v in [("lat", 21.0285), ("lon", 105.8542),
              ("active_source_used", "ECMWF"),
              ("_last_tip", None), ("_last_lc", None),
              ("_source_auto", True), ("_ecmwf_available", True),
-             ("map_tile", "windy"),
+             ("map_tile", "himawari"),
              ("_need_fly", False), ("_skip_prefetch", False),
              ("_scan_result", None), ("_scan_days", 0), ("_scan_scanning", False), ("_scan_region", "bac"), ("_scan_best", False),
              ("_scan_tonight", False), ("_scan_fallback_label", None)]:
@@ -1887,10 +1887,9 @@ st.markdown("<div style='margin-top:38px'></div>", unsafe_allow_html=True)
 
 # ── MAP tile switcher — ASCII keys only, no emoji in any string passed to folium ──
 _TILE_SAT_URL  = 'https://mt1.google.com/vt/lyrs=y&x={x}&y={y}&z={z}'
-_TILE_STR_URL  = 'https://{s}.basemaps.cartocdn.com/rastertiles/voyager/{z}/{x}/{y}{r}.png'
 
-if st.session_state.map_tile not in ("satellite", "street", "windy"):
-    st.session_state.map_tile = "windy"
+if st.session_state.map_tile not in ("satellite", "himawari", "windy"):
+    st.session_state.map_tile = "himawari"
  
 # ==============================================================================
 # KHỐI C (v7 — bản sửa đúng) — xoá sạch KHỐI C cũ, dán nguyên khối này vào,
@@ -2081,18 +2080,9 @@ m = folium.Map(
     prefer_canvas=True,   # dùng Canvas renderer → ít DOM node hơn, scroll mượt hơn
 )
 
-# ── Tile layers (chỉ để JS switchTile có thể gọi; không load ngay) ──
-_street_layer = folium.TileLayer(
-    tiles=_TILE_STR_URL, attr='CartoDB Voyager', name='street', overlay=False
-)
-_street_layer.add_to(m)
+# (Street tab removed. OpenRailwayMap is now added by JS only in Satellite mode.)
 
-folium.TileLayer(
-    tiles='https://{s}.tiles.openrailwaymap.org/standard/{z}/{x}/{y}.png',
-    name='OpenRailwayMap', overlay=True, control=True, opacity=0.25, attr='OpenRailwayMap'
-).add_to(m)
-
-# ── Combined BottomRight control: [📍 Label  LPM] + [Windy|Satellite|Street] ──
+# ── Combined BottomRight control: [📍 Label  LPM] + [Windy|Satellite|Himawari] ──
 # Gộp thành một control duy nhất (column) để kiểm soát khoảng cách chính xác.
 from folium import MacroElement
 from jinja2 import Template
@@ -2245,7 +2235,7 @@ _COMBINED_CTRL_TEMPLATE = Template("""
       };
 
 
-      // ── Row 2: Windy | Satellite | Street ─────────────────────────────────
+      // ── Row 2: Windy | Satellite | Himawari ─────────────────────────────────
       var tileRow = L.DomUtil.create('div', '', col);
       tileRow.style.cssText = (
         'display:flex;gap:4px;background:rgba(15,23,42,0.88);'
@@ -2254,12 +2244,305 @@ _COMBINED_CTRL_TEMPLATE = Template("""
       );
 
       var tiles = {
-        satellite: 'https://mt1.google.com/vt/lyrs=y&x={x}&y={y}&z={z}',
-        street:    'https://{s}.basemaps.cartocdn.com/rastertiles/voyager/{z}/{x}/{y}{r}.png'
+        satellite: 'https://mt1.google.com/vt/lyrs=y&x={x}&y={y}&z={z}'
       };
-      var attrs = { satellite: 'Google Satellite Hybrid', street: 'CartoDB Voyager' };
+      var attrs = { satellite: 'Google Satellite Hybrid' };
       var current = null;
+      var ormLayer = null;   // OpenRailwayMap overlay, Satellite mode only
       var btns = {};
+
+      // ── Himawari (JMA) infrared: dark base + labels + short animation ────────
+      // Tiles are plain <img> requests, so no CORS problem. The frame list comes
+      // from targetTimes_jp.json (fetch); if that fetch is blocked we probe tiles
+      // backwards in 10-min steps instead (basetime == validtime for satimg).
+      var HIM_BASE   = 'https://www.jma.go.jp/bosai/himawari/data/satimg/';
+      var HIM_AREA   = 'fd';              // full disk: phủ cả Việt Nam (vùng 'jp' chỉ phủ Nhật)
+      var HIM_ELEM   = 'B13/TBB';          // infrared (works day and night)
+      var HIM_MINZ   = 3;                  // native tile zoom range (upscaled beyond)
+      var HIM_MAXZ   = 5;                  // fd chỉ có zoom 3-5
+      var HIM_FRAMES = 8;                  // frames in the loop (10 min apart)
+      var HIM_OPAC   = 1.0;    // max by default; adjustable with the slider
+      var HIM_CONT   = 1.2;    // cloud contrast (CSS contrast()); 1.0 = original, higher = darker gaps between clouds
+      // Base map = NASA VIIRS Black Marble (city lights on black), free, no API key.
+      // (Carto basemaps now print "API KEY REQUIRED" over every tile, so Carto is no longer used.)
+      var HIM_BASE_PRIMARY  = 'https://gibs.earthdata.nasa.gov/wmts/epsg3857/best/VIIRS_Black_Marble/default/GoogleMapsCompatible_Level8/{z}/{y}/{x}.png';
+      var HIM_BASE_FALLBACK = 'https://gibs.earthdata.nasa.gov/wmts/epsg3857/best/VIIRS_CityLights_2012/default/GoogleMapsCompatible_Level8/{z}/{y}/{x}.jpg';
+      // CSS filter on the lights layer: contrast>1 kills the faint grey haze and keeps bright cores -> crisper, darker look.
+      // Tune here: brightness(0.8-1.2), contrast(1.2-2.0).
+      // Gamma curve out = AMP * in^EXP on the lights: EXP>1 darkens the haze/mid-tones, AMP<1 caps the blown-out city cores.
+      //   core too bright -> lower HIM_GAMMA_AMP (0.6-0.9)   |   too dim overall -> lower HIM_GAMMA_EXP (1.3-2.2)
+      var HIM_GAMMA_AMP = 0.20;
+      var HIM_GAMMA_EXP = 1.9;
+      (function() {
+        if (document.getElementById('him-gamma-svg')) return;
+        var d = document.createElement('div');
+        d.id = 'him-gamma-svg';
+        d.style.cssText = 'position:absolute;width:0;height:0;overflow:hidden;';
+        var fn = function(c) { return '<feFunc' + c + ' type="gamma" amplitude="' + HIM_GAMMA_AMP + '" exponent="' + HIM_GAMMA_EXP + '" offset="0"/>'; };
+        d.innerHTML = '<svg xmlns="http://www.w3.org/2000/svg" width="0" height="0"><filter id="him-gamma" color-interpolation-filters="sRGB">'
+          + '<feComponentTransfer>' + fn('R') + fn('G') + fn('B') + '</feComponentTransfer></filter></svg>';
+        document.body.appendChild(d);
+      })();
+      var HIM_LIGHT_FILTER = 'url(#him-gamma)';
+      // Max zoom in Himawari mode (data is coarse, so deeper zoom is just an enlarged/blurry view).
+      var HIM_VIEW_MAXZ = 11;
+      // Labels: Esri reference layer (free, no key), designed to overlay dark imagery.
+      var HIM_LABELS = 'https://services.arcgisonline.com/ArcGIS/rest/services/Reference/World_Boundaries_and_Places/MapServer/tile/{z}/{y}/{x}';
+      var PLAY_HTML  = '&#9654;';
+      var PAUSE_HTML = '&#10074;&#10074;';
+      var himFrames = [], himIdx = 0, himTimer = null, himTok = 0, himPlaying = false;
+      var himLabelLayer = null;
+      var himNote = '';
+      var himBorderLayers = [], himBorderCache = {};
+      var HIM_BORDERS = [
+        { w: 1.0, o: 0.9, urls: [
+          'https://cdn.jsdelivr.net/gh/nvkelso/natural-earth-vector@master/geojson/ne_50m_admin_0_boundary_lines_land.geojson',
+          'https://raw.githubusercontent.com/nvkelso/natural-earth-vector/master/geojson/ne_50m_admin_0_boundary_lines_land.geojson' ] },
+        { w: 0.9, o: 0.8, urls: [
+          'https://cdn.jsdelivr.net/gh/nvkelso/natural-earth-vector@master/geojson/ne_50m_coastline.geojson',
+          'https://raw.githubusercontent.com/nvkelso/natural-earth-vector/master/geojson/ne_50m_coastline.geojson' ] }
+      ];
+
+      var himRow = L.DomUtil.create('div', '', col);
+      himRow.style.cssText = (
+        'display:none;align-items:center;gap:6px;'
+        + 'background:rgba(15,23,42,0.88);border:1px solid #334155;'
+        + 'border-radius:8px;padding:4px 8px;box-shadow:0 2px 8px rgba(0,0,0,0.6);'
+      );
+      var himPlay = L.DomUtil.create('button', '', himRow);
+      himPlay.innerHTML = PLAY_HTML;
+      himPlay.title = 'Play / pause the last ~70 min';
+      himPlay.style.cssText = (
+        'border:none;cursor:pointer;border-radius:5px;padding:2px 9px;'
+        + 'font-size:12px;font-weight:700;background:#3b82f6;color:#ffffff;'
+      );
+      var himLbl = L.DomUtil.create('span', '', himRow);
+      himLbl.style.cssText = 'color:#e2e8f0;font-size:11px;font-weight:600;white-space:nowrap;';
+      var himSlider = L.DomUtil.create('input', '', himRow);
+      himSlider.type = 'range'; himSlider.min = '15'; himSlider.max = '100';
+      himSlider.value = String(Math.round(HIM_OPAC * 100));
+      himSlider.title = 'IR cloud opacity (lower = see borders better)';
+      himSlider.style.cssText = 'display:none;width:70px;height:4px;cursor:pointer;';   // hidden: fixed 100%
+      var himContLbl = L.DomUtil.create('span', '', himRow);
+      himContLbl.textContent = 'Contrast';
+      himContLbl.style.cssText = 'display:none;color:#94a3b8;font-size:10px;font-weight:600;';
+      var himCont = L.DomUtil.create('input', '', himRow);
+      himCont.type = 'range'; himCont.min = '100'; himCont.max = '300';
+      himCont.value = String(Math.round(HIM_CONT * 100));
+      himCont.title = 'Cloud contrast (higher = whiter clouds, darker gaps)';
+      himCont.style.cssText = 'display:none;width:70px;height:4px;cursor:pointer;';   // hidden: fixed default
+      function _himApplyFilter(f) {
+        if (!f.layer) return;
+        var el = f.layer.getContainer();
+        if (el) el.style.filter = 'contrast(' + HIM_CONT + ')';
+        if (el) el.style.mixBlendMode = 'screen';
+      }
+      L.DomEvent.on(himCont, 'input', function() {
+        HIM_CONT = (+himCont.value) / 100;
+        himFrames.forEach(_himApplyFilter);
+      });
+      L.DomEvent.disableClickPropagation(himRow);
+      L.DomEvent.on(himSlider, 'input', function() {
+        HIM_OPAC = (+himSlider.value) / 100;
+        if (himFrames[himIdx] && himFrames[himIdx].layer) himFrames[himIdx].layer.setOpacity(HIM_OPAC);
+      });
+
+      function _p2(n) { return (n < 10 ? '0' : '') + n; }
+
+      // 'yyyymmddhhmmss' (UTC) -> 'MM/DD HH:mm ICT'
+      function _himFmt(v) {
+        var d = new Date(Date.UTC(+v.slice(0, 4), +v.slice(4, 6) - 1, +v.slice(6, 8), +v.slice(8, 10), +v.slice(10, 12)));
+        d = new Date(d.getTime() + 7 * 3600 * 1000);
+        return _p2(d.getUTCMonth() + 1) + '/' + _p2(d.getUTCDate()) + ' '
+          + _p2(d.getUTCHours()) + ':' + _p2(d.getUTCMinutes()) + ' ICT';
+      }
+      function _himUtcStamp(ms) {
+        var d = new Date(ms);
+        return d.getUTCFullYear() + _p2(d.getUTCMonth() + 1) + _p2(d.getUTCDate())
+          + _p2(d.getUTCHours()) + _p2(d.getUTCMinutes()) + '00';
+      }
+      function _himUrl(f) {
+        return HIM_BASE + f.b + '/' + HIM_AREA + '/' + f.v + '/' + HIM_ELEM + '/{z}/{x}/{y}.jpg';
+      }
+
+      function _himParse(j) {
+        var out = [];
+        if (!Array.isArray(j)) return out;
+        j.forEach(function(x) {
+          if (x && x.basetime && x.validtime) out.push({ b: String(x.basetime), v: String(x.validtime) });
+        });
+        out.sort(function(a, b) { return a.v < b.v ? -1 : (a.v > b.v ? 1 : 0); });
+        var ded = [];
+        out.forEach(function(x) {
+          if (ded.length && ded[ded.length - 1].v === x.v) { ded[ded.length - 1] = x; } else { ded.push(x); }
+        });
+        return ded.slice(-HIM_FRAMES);
+      }
+
+      // Fallback: find the newest frame by loading a Vietnam tile (z5 x25 y14), 10-min steps back.
+      function _himProbe(cb) {
+        var step = 10 * 60 * 1000;
+        var t = Math.floor((Date.now() - 10 * 60 * 1000) / step) * step;
+        var tries = 0;
+        function next() {
+          if (tries++ > 12) { cb([]); return; }
+          var v = _himUtcStamp(t);
+          var img = new Image();
+          img.onload = function() {
+            var out = [];
+            for (var k = HIM_FRAMES - 1; k >= 0; k--) {
+              var vv = _himUtcStamp(t - k * step);
+              out.push({ b: vv, v: vv });
+            }
+            cb(out);
+          };
+          img.onerror = function() { t -= step; next(); };
+          img.src = HIM_BASE + v + '/' + HIM_AREA + '/' + v + '/' + HIM_ELEM + '/5/25/14.jpg';
+        }
+        next();
+      }
+
+      function _himLoadTimes(cb) {
+        var finished = false;
+        function done(list) { if (finished) return; finished = true; cb(list); }
+        function fallback() { _himProbe(done); }
+        try {
+          fetch(HIM_BASE + 'targetTimes_' + HIM_AREA + '.json', { cache: 'no-store' })
+            .then(function(r) { if (!r.ok) throw new Error('http ' + r.status); return r.json(); })
+            .then(function(j) {
+              var l = _himParse(j);
+              if (l.length) { done(l); } else { fallback(); }
+            })
+            .catch(fallback);
+        } catch (e) { fallback(); }
+      }
+
+      function _himEnsure(f) {
+        if (f.layer) return;
+        f.layer = L.tileLayer(_himUrl(f), {
+          opacity: 0, minNativeZoom: HIM_MINZ, maxNativeZoom: HIM_MAXZ, maxZoom: 19,
+          zIndex: 5, attribution: 'JMA'
+        });
+        f.layer.addTo(map);
+        _himApplyFilter(f);
+      }
+      function _himShow(i) {
+        himIdx = i;
+        himFrames.forEach(function(f, k) {
+          if (f.layer) f.layer.setOpacity(k === i ? HIM_OPAC : 0);
+        });
+        himLbl.textContent = 'JMA Himawari IR  ' + _himFmt(himFrames[i].v) + himNote;
+      }
+      // Base layer = city lights (always on). If the primary Black Marble tiles all fail, fall back to CityLights 2012.
+      function _himBaseLayer() {
+        var oks = 0, errs = 0, swapped = false;
+        var lyr = L.tileLayer(HIM_BASE_PRIMARY, {
+          maxNativeZoom: 8, maxZoom: 19, zIndex: 1, attribution: 'NASA GIBS / VIIRS Black Marble'
+        });
+        lyr.on('tileload', function() { oks++; });
+        lyr.on('tileerror', function() {
+          errs++;
+          if (!swapped && oks === 0 && errs >= 4) { swapped = true; lyr.setUrl(HIM_BASE_FALLBACK); }
+        });
+        return lyr;
+      }
+      function _himStop() {
+        himPlaying = false;
+        if (himTimer) { clearTimeout(himTimer); himTimer = null; }
+        himPlay.innerHTML = PLAY_HTML;
+      }
+      function _himCleanup() {
+        himTok++;
+        _himStop();
+        himFrames.forEach(function(f) { if (f.layer) { map.removeLayer(f.layer); } });
+        himFrames = [];
+        if (himLabelLayer) { map.removeLayer(himLabelLayer); himLabelLayer = null; }
+        map.setMaxZoom(19);   // undo the Himawari zoom cap
+        himBorderLayers.forEach(function(l) { map.removeLayer(l); });
+        himBorderLayers = [];
+        himNote = '';
+        himRow.style.display = 'none';
+      }
+      function _himFetchFirst(urls, cb) {
+        var i = 0;
+        (function next() {
+          if (i >= urls.length) { cb(null); return; }
+          var u = urls[i++];
+          if (himBorderCache[u]) { cb(himBorderCache[u]); return; }
+          try {
+            fetch(u).then(function(r) { if (!r.ok) throw new Error('http ' + r.status); return r.json(); })
+              .then(function(j) { himBorderCache[u] = j; cb(j); })
+              .catch(next);
+          } catch (e) { next(); }
+        })();
+      }
+      // Vector borders (country borders + coastlines) drawn ABOVE the cloud tiles.
+      function _himBorders(tok) {
+        if (!map.getPane('himBorders')) {
+          var pn = map.createPane('himBorders');
+          pn.style.zIndex = 250;
+          pn.style.pointerEvents = 'none';
+        }
+        var okCount = 0, doneCount = 0;
+        HIM_BORDERS.forEach(function(src) {
+          _himFetchFirst(src.urls, function(data) {
+            doneCount++;
+            if (tok === himTok && data) {
+              var lyr = L.geoJSON(data, {
+                pane: 'himBorders', interactive: false,
+                style: { color: '#f8fafc', weight: src.w, opacity: src.o, fill: false }
+              });
+              lyr.addTo(map);
+              himBorderLayers.push(lyr);
+              okCount++;
+            }
+            if (tok === himTok && doneCount === HIM_BORDERS.length && okCount === 0) {
+              himNote = '  (no border data)';
+              if (himFrames[himIdx]) _himShow(himIdx);
+            }
+          });
+        });
+      }
+
+      // Auto-loop: 600 ms per frame, 1.8 s pause on the newest frame, then restart.
+      function _himStart(from) {
+        if (!himFrames.length) return;
+        himPlaying = true;
+        himPlay.innerHTML = PAUSE_HTML;
+        himFrames.forEach(function(f) { _himEnsure(f); });
+        var tok = himTok;
+        var i = from || 0;
+        var last = himFrames.length - 1;
+        _himShow(i);
+        function tick() {
+          if (!himPlaying || tok !== himTok) return;
+          i = (i + 1) % himFrames.length;
+          _himShow(i);
+          himTimer = setTimeout(tick, i === last ? 1800 : 600);
+        }
+        himTimer = setTimeout(tick, 1200);   // let the extra frames load their tiles first
+      }
+
+      function _himEnter() {
+        himRow.style.display = 'flex';
+        himLbl.textContent = 'JMA Himawari IR  loading...';
+        himLabelLayer = L.tileLayer(HIM_LABELS, { maxZoom: 19, zIndex: 10, opacity: 0.9 });
+        himLabelLayer.addTo(map);
+        var tok = ++himTok;
+        _himBorders(tok);
+        _himLoadTimes(function(list) {
+          if (tok !== himTok) return;
+          if (!list.length) { himLbl.textContent = 'Himawari: no data'; return; }
+          himFrames = list.map(function(t) { return { b: t.b, v: t.v, layer: null }; });
+          _himStart(0);
+        });
+      }
+
+      L.DomEvent.on(himPlay, 'click', function() {
+        if (!himFrames.length) return;
+        if (himPlaying) { _himStop(); return; }
+        _himStart(himIdx);
+      });
 
       function switchTile(mode) {
         var mapEl = map.getContainer();
@@ -2271,6 +2554,8 @@ _COMBINED_CTRL_TEMPLATE = Template("""
         var isWindy = (mode === 'windy');
         if (zoomIn)  { zoomIn.style.opacity  = isWindy ? '0.35' : '1'; zoomIn.style.pointerEvents  = isWindy ? 'none' : 'auto'; zoomIn.style.cursor  = isWindy ? 'not-allowed' : ''; }
         if (zoomOut) { zoomOut.style.opacity = isWindy ? '0.35' : '1'; zoomOut.style.pointerEvents = isWindy ? 'none' : 'auto'; zoomOut.style.cursor = isWindy ? 'not-allowed' : ''; }
+        _himCleanup();
+        if (ormLayer) { map.removeLayer(ormLayer); ormLayer = null; }
         if (mode === 'windy') {
           var c = map.getCenter();
           var z = map.getZoom();
@@ -2278,11 +2563,26 @@ _COMBINED_CTRL_TEMPLATE = Template("""
           if (needSync) { window.flyWindy(c.lat, c.lng, z); }
           if (current) { map.removeLayer(current); current = null; }
           _windyFrame.style.display = 'block';
+        } else if (mode === 'himawari') {
+          if (_windyFrame) _windyFrame.style.display = 'none';
+          if (current) { map.removeLayer(current); }
+          current = _himBaseLayer();
+          current.addTo(map);
+          var _bc = current.getContainer();
+          if (_bc) _bc.style.filter = HIM_LIGHT_FILTER;
+          map.setMaxZoom(HIM_VIEW_MAXZ);
+          if (map.getZoom() > HIM_VIEW_MAXZ) map.setZoom(HIM_VIEW_MAXZ);
+          _himEnter();
         } else {
           if (_windyFrame) _windyFrame.style.display = 'none';
           if (current) { map.removeLayer(current); }
           current = L.tileLayer(tiles[mode], { attribution: attrs[mode], maxZoom: 19 });
           current.addTo(map);
+          if (mode === 'satellite') {
+            ormLayer = L.tileLayer('https://{s}.tiles.openrailwaymap.org/standard/{z}/{x}/{y}.png',
+              { opacity: 0.25, maxZoom: 19, attribution: 'OpenRailwayMap' });
+            ormLayer.addTo(map);
+          }
         }
         _lsSet(LS_TILE, mode);
         Object.keys(btns).forEach(function(k){
@@ -2291,7 +2591,7 @@ _COMBINED_CTRL_TEMPLATE = Template("""
         });
       }
 
-      ['windy','satellite','street'].forEach(function(mode){
+      ['windy','satellite','himawari'].forEach(function(mode){
         var btn = L.DomUtil.create('button', '', tileRow);
         btn.textContent = mode === 'windy' ? 'Windy'
                         : mode.charAt(0).toUpperCase() + mode.slice(1);
@@ -2303,8 +2603,8 @@ _COMBINED_CTRL_TEMPLATE = Template("""
       });
 
       map.whenReady(function(){
-        var saved = _lsGet(LS_TILE, 'windy');
-        if (saved !== 'satellite' && saved !== 'street' && saved !== 'windy') saved = 'windy';
+        var saved = _lsGet(LS_TILE, 'himawari');
+        if (saved !== 'himawari' && saved !== 'windy') saved = 'himawari';   // Satellite no longer the start tab
         switchTile(saved);
       });
 
@@ -2317,7 +2617,7 @@ _COMBINED_CTRL_TEMPLATE = Template("""
 """)
 
 class _CombinedControl(MacroElement):
-    def __init__(self, lpm_url, location_name, initial_tile="windy", lat=35.6895, lon=139.6917):
+    def __init__(self, lpm_url, location_name, initial_tile="himawari", lat=35.6895, lon=139.6917):
         super().__init__()
         self._name = '_CombinedControl'
         self._template = _COMBINED_CTRL_TEMPLATE
