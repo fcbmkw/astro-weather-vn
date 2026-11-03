@@ -199,6 +199,44 @@ def _strip_loc_num(name: str) -> str:
     import re
     return re.sub(r'^\d+\.\s*', '', name).strip()
 
+# Vài tên không tách đúng bằng quy tắc chung (phần tiếng Anh/Việt trùng hoặc không có dấu)
+_EN_PART_FIX = {"Y Ty Y": "Y Ty", "Nui": "Nui Mat", "Eo Gio Quy Nhon Eo": "Eo Gio Quy Nhon"}
+
+def _vn_en_part(s: str) -> str:
+    """Lấy phần tiếng Anh ở đầu tên địa điểm (bỏ phần tiếng Việt có dấu theo sau).
+    'Long Coc Tea Hill Đồi chè Long Cốc' -> 'Long Coc Tea Hill'
+    'Bac Son Valley Thung lũng Bắc Sơn'  -> 'Bac Son Valley'
+    'Thung Nai Thung Nai'                -> 'Thung Nai'"""
+    toks = s.split()
+    cut = len(toks)
+    for i, t in enumerate(toks):
+        if any(ord(c) > 127 for c in t):
+            cut = i
+            # từ ngay trước là từ tiếng Việt viết hoa không dấu (vd 'Thung' trong 'Thung lũng')
+            if i >= 2 and t[0].islower() and toks[i-1][0].isupper() and toks[i-1].isascii():
+                cut = i - 1
+            break
+    toks = toks[:cut]
+    h = len(toks) // 2
+    if len(toks) >= 2 and len(toks) % 2 == 0 and toks[:h] == toks[h:]:   # 'Thung Nai Thung Nai'
+        toks = toks[:h]
+    out = " ".join(toks).strip() or s
+    return _EN_PART_FIX.get(out, out)
+
+def _disp_name(name: str) -> str:
+    """Tên hiển thị gọn: bỏ số thứ tự đầu + phần tiếng Việt, giữ tỉnh.
+    '1. Long Coc Tea Hill Đồi chè Long Cốc, Phu Tho' -> 'Long Coc Tea Hill, Phu Tho'. Chỉ dùng để HIỂN THỊ."""
+    n = _strip_loc_num(name or "")
+    if "," in n:
+        head, prov = n.rsplit(",", 1)
+        return f"{_vn_en_part(head.strip())}, {prov.strip()}"
+    return _vn_en_part(n) if n else (name or "")
+
+def _disp_name_html(name: str) -> str:
+    """Tên hiển thị tô màu cam, dùng trong tiêu đề."""
+    import html as _h
+    return f'<span style="color:#fb923c;">{_h.escape(_disp_name(name))}</span>'
+
 @st.cache_data(ttl=3600, show_spinner=False)   # cache 1 giờ — tên địa điểm không đổi
 def fetch_location_name(lat, lon):
     url = f"https://nominatim.openstreetmap.org/reverse?format=json&lat={lat}&lon={lon}&zoom=10&addressdetails=1"
@@ -521,8 +559,40 @@ _ENDPOINTS = [
     ("gfs_only",f"&hourly={_FIELDS}&models=gfs_seamless&wind_speed_unit=ms&timezone=auto"),
 ]
 
+@st.cache_resource
+def _wx_prefetch_store():
+    """Kho dùng chung giữa các lần rerun: data = kết quả đã tải sẵn, at = thời điểm tải (epoch giây)."""
+    return {"data": {}, "at": {}}
+
+def _wx_prefetch(coords, workers=8):
+    """Tải song song thời tiết cho nhiều toạ độ (chỉ requests thuần, không đụng streamlit trong thread).
+    Kết quả để trong kho; _fetch_weather_raw (có cache) sẽ lấy ra dùng -> cache vẫn ghi ở thread chính."""
+    import time as _t
+    from concurrent.futures import ThreadPoolExecutor
+    store = _wx_prefetch_store()
+    now = _t.time()
+    todo = [c for c in dict.fromkeys(coords) if now - store["at"].get(c, 0) > 3300]
+    if not todo:
+        return
+    def one(c):
+        try:
+            return c, _fetch_weather_raw_impl(c[0], c[1])
+        except Exception:
+            return c, None
+    with ThreadPoolExecutor(max_workers=workers) as ex:
+        for c, res in ex.map(one, todo):
+            if res and res[2] != "offline":      # lỗi thì để _fetch_weather_raw tự thử lại
+                store["data"][c] = res
+                store["at"][c] = now
+
 @st.cache_data(ttl=3600, show_spinner=False)
 def _fetch_weather_raw(lat, lon):
+    pre = _wx_prefetch_store()["data"].pop((lat, lon), None)
+    if pre is not None:
+        return pre
+    return _fetch_weather_raw_impl(lat, lon)
+
+def _fetch_weather_raw_impl(lat, lon):
     """Raw API fetch với retry + multi-endpoint fallback.
     Returns (hourly_dict, utc_offset_seconds, endpoint_used_label, last_error)"""
     import time as _time
@@ -3682,107 +3752,91 @@ with col_right:
         st.session_state._source_auto = False  # user chọn tay → không auto-switch nữa
         st.rerun()
 
-    # 7-Day Forecast Table — replaces Random Overlap Assumption
-    def _cloud_status_icon(cloud_pct, precip=0.0):
-        """Return weather icon + label based on cloud cover and precipitation."""
-        if precip is not None and precip > 2.0:
-            if cloud_pct > 70:
-                return "\u26c8\ufe0f", "Storm"
-            return "\U0001f327\ufe0f", "Rainy"
-        if cloud_pct <= 20:
-            return "\u2600\ufe0f", "Sunny"
-        elif cloud_pct <= 45:
-            return "\u26c5", "Partly"
-        elif cloud_pct <= 70:
-            return "\U0001f325\ufe0f", "Cloudy"
-        else:
-            return "\u2601\ufe0f", "Overcast"
+    # ── TODAY HIGHLIGHT — thay vị trí 7-DAY FORECAST cũ (cùng kích thước) ─────
+    # Mỗi vùng: liệt kê các địa điểm có thời tiết đêm nay OK (PERFECT / GOOD STARRY NIGHT).
+    # Không có địa điểm nào → ghi "None" (xám). Muốn thêm/bớt vùng chỉ cần sửa _TH_REGIONS.
+    _TH_REGIONS = ["bac", "trung", "nam"]
+    _TH_LABELS  = {"bac": "North", "trung": "Central", "nam": "South"}
+    _TH_MAX_SHOW = 2   # số địa điểm hiển thị tối đa mỗi vùng (còn lại gộp thành +N)
 
-    # Build 7-day daily summary from hourly_data
-    ICT_now = datetime.now(ICT)
-    _7day_rows = []
-    for _doff in range(7):
-        _d = (ICT_now + timedelta(days=_doff)).replace(tzinfo=None)
-        _dpfx = _d.strftime("%Y-%m-%d")
-        _day_label = _d.strftime("%a %d/%m")
+    def _th_short(name):
+        n = _strip_loc_num(name).rsplit(",", 1)[0].strip()
+        return _vn_en_part(n) or name
 
-        _temps, _clouds, _precips = [], [], []
-        _tlist = hourly_data.get("time", []) if hourly_data else []
-        for _i, _t in enumerate(_tlist):
-            if _t.startswith(_dpfx):
-                _hr = int(_t[11:13])
-                for _sfx in ["_gfs_seamless", "_ecmwf_ifs025"]:
-                    _v = _get_raw(hourly_data, "temperature_2m", _sfx, _i)
-                    if _v is not None:
-                        _temps.append((_hr, _v))
-                        break
-                else:
-                    _raw_t = hourly_data.get("temperature_2m", [])
-                    if _i < len(_raw_t) and _raw_t[_i] is not None:
-                        _temps.append((_hr, float(_raw_t[_i])))
-                _cv, _ = get_val(hourly_data, "cloud_cover", _i, prefer_ecmwf)
-                _clouds.append(_cv)
-                for _sfx in ["_gfs_seamless", "_ecmwf_ifs025"]:
-                    _pv = _get_raw(hourly_data, "precipitation", _sfx, _i)
-                    if _pv is not None:
-                        _precips.append(_pv)
-                        break
+    @st.cache_data(ttl=1800, show_spinner=False)
+    def _today_highlight_data(source, day_key):
+        """{region: [(short_name, full_name, tier), ...]} — PERFECT trước, GOOD sau.
+        Chạy tuần tự (không thread) vì @st.cache_data không thread-safe khi write.
+        Dùng danh sách dedupe 60km; weather fetch đã cache 1h."""
+        out = {}
+        _wx_prefetch([(la, lo) for rk in _TH_REGIONS
+                      for _nm, (la, lo) in _locs_for_region(rk, for_best_or_tonight=True)])
+        for rk in _TH_REGIONS:
+            hits = []
+            for nm, (la, lo) in _locs_for_region(rk, for_best_or_tonight=True):
+                res = _night_verdict_for_single_loc(la, lo, day_off=0)
+                if not res:
+                    continue
+                tier = res["verdict"].get("tier")
+                if tier in ("PERFECT NIGHT", "GOOD STARRY NIGHT"):
+                    hits.append((_th_short(nm), nm, tier))
+            hits.sort(key=lambda x: 0 if x[2] == "PERFECT NIGHT" else 1)
+            out[rk] = hits
+        return out
 
-        if _temps:
-            _noon = min(_temps, key=lambda x: abs(x[0] - 12))
-            _temp_noon = round(_noon[1], 1)
-            _temp_min  = round(min(v for _, v in _temps), 1)
-            _temp_max  = round(max(v for _, v in _temps), 1)
-        else:
-            _temp_noon = _temp_min = _temp_max = None
-
-        _avg_cloud = round(sum(_clouds) / len(_clouds)) if _clouds else 0
-        _total_precip = round(sum(_precips), 1) if _precips else 0.0
-        _icon, _status = _cloud_status_icon(_avg_cloud, _total_precip)
-
-        if _temp_max is not None and _temp_max < 3.0 and _total_precip > 0.5:
-            _icon, _status = "\u2744\ufe0f", "Snowy"
-
-        _7day_rows.append({
-            "day": _day_label,
-            "icon": _icon,
-            "status": _status,
-            "temp_max": _temp_max,
-            "temp_min": _temp_min,
-            "cloud": _avg_cloud,
-        })
-
-    if _7day_rows:
-        _rows7 = ""
-        for _r in _7day_rows:
-            _tmax_str = f"{_r['temp_max']}\u00b0" if _r['temp_max'] is not None else "\u2014"
-            _tmin_str = f"{_r['temp_min']}\u00b0" if _r['temp_min'] is not None else "\u2014"
-            _cloud_color = '#22c55e' if _r['cloud'] <= 25 else ('#eab308' if _r['cloud'] <= 50 else ('#f97316' if _r['cloud'] <= 75 else '#ef4444'))
-            _rows7 += (
-                f'<div style="display:flex;flex-direction:column;align-items:center;gap:3px;'
-                f'background:rgba(255,255,255,0.04);border-radius:10px;padding:10px 6px;'
-                f'border:1px solid #1e293b;flex:1;min-width:0;">'
-                f'<div style="font-size:11px;color:#94a3b8;font-weight:600;white-space:nowrap;'
-                f'overflow:hidden;text-overflow:ellipsis;max-width:100%;text-align:center;">{_r["day"]}</div>'
-                f'<div style="font-size:26px;line-height:1.1;">{_r["icon"]}</div>'
-                f'<div style="font-size:11px;color:#cbd5e1;font-weight:500;">{_r["status"]}</div>'
-                f'<div style="font-size:13px;font-weight:700;color:#f97316;">{_tmax_str}</div>'
-                f'<div style="font-size:11px;color:#60a5fa;">{_tmin_str}</div>'
-                f'<div style="font-size:10px;color:{_cloud_color};margin-top:2px;">{_r["cloud"]}%</div>'
+    def _th_html(_th_data):
+        _th_rows = ""
+        for _rk in _TH_REGIONS:
+            _hits = (_th_data or {}).get(_rk, [])
+            _lbl_col = "#e2e8f0" if _hits else "#64748b"
+            if _hits:
+                _chips = ""
+                for _sn, _fn, _tier in _hits[:_TH_MAX_SHOW]:
+                    _c = "#6ee7b7" if _tier == "PERFECT NIGHT" else "#93c5fd"
+                    _chips += (f'<span title="{_fn} — {_tier}" style="color:{_c};font-weight:600;'
+                               f'overflow:hidden;text-overflow:ellipsis;white-space:nowrap;'
+                               f'min-width:0;flex:0 1 auto;">{_sn}</span>')
+                if len(_hits) > _TH_MAX_SHOW:
+                    _more = "&#10;".join(h[1] for h in _hits[_TH_MAX_SHOW:])
+                    _chips += (f'<span title="{_more}" style="color:#94a3b8;flex:0 0 auto;">'
+                               f'+{len(_hits) - _TH_MAX_SHOW}</span>')
+            elif _th_data is None:
+                _chips = '<span style="color:#64748b;">loading…</span>'
+            else:
+                _chips = '<span style="color:#64748b;font-weight:600;">None</span>'
+            _th_rows += (
+                f'<div style="display:flex;align-items:center;gap:6px;height:16px;'
+                f'background:rgba(255,255,255,0.04);border:1px solid #1e293b;border-radius:6px;'
+                f'padding:0 6px;font-size:10px;line-height:16px;">'
+                f'<span style="flex:0 0 56px;color:{_lbl_col};font-weight:700;">'
+                f'{_TH_LABELS.get(_rk, _rk.title())}</span>'
+                f'<div style="display:flex;gap:6px;min-width:0;flex:1;overflow:hidden;">{_chips}</div>'
                 f'</div>'
             )
-        _forecast_html = (
+        _html = (
             '<div style="margin-top:8px;">'
             '<div style="font-size:12px;color:#94a3b8;font-weight:700;margin-bottom:6px;letter-spacing:0.5px;">'
-            '\U0001f5d3\ufe0f 7-DAY FORECAST</div>'
-            '<div style="display:flex;gap:4px;width:100%;">'
-            + _rows7 +
-            '</div>'
+            '\U0001f31f TODAY HIGHLIGHT</div>'
+            f'<div style="display:flex;flex-direction:column;gap:2px;width:100%;">{_th_rows}</div>'
             '<div style="font-size:10px;color:#475569;margin-top:5px;text-align:right;">'
-            '\u2191 High &nbsp;\u2193 Low &nbsp;\u2601 Cloud%</div>'
-            '</div>'
-        )
-        st.markdown(_forecast_html, unsafe_allow_html=True)
+            '<span style="color:#6ee7b7;">&#9679;</span> Perfect &nbsp;'
+            '<span style="color:#93c5fd;">&#9679;</span> Good &nbsp;(tonight)</div>'
+            '</div>')
+        return _html
+
+    _th_ph = st.empty()   # giữ chỗ: hiện ngay (dữ liệu lần trước hoặc 'loading…'), tính xong ở cuối script
+
+    def _th_render():
+        _d = st.session_state.get("_th_last")
+        try:
+            _d = _today_highlight_data(st.session_state.weather_source,
+                                       _night_base_ict.strftime("%Y-%m-%d"))
+            st.session_state._th_last = _d
+        except Exception:
+            pass
+        _th_ph.markdown(_th_html(_d if _d is not None else {}), unsafe_allow_html=True)
+
+    _th_ph.markdown(_th_html(st.session_state.get("_th_last")), unsafe_allow_html=True)
 
 
 with col_left:
@@ -4029,6 +4083,268 @@ with col_left:
             st.cache_data.clear()
             st.rerun(scope="app")
 
+# ── CLEAR SKY CHART — 7 ngày × 24 giờ (kiểu Clear Sky Chart, đặt phía trên biểu đồ Moon/Sun/Milky Way) ──
+# Mỗi hàng = 1 chỉ số, mỗi ô = 1 giờ (giờ địa phương). Dữ liệu lấy từ hourly_data đã fetch
+# sẵn → đổi địa điểm là tự cập nhật. Màu: xanh đậm = tốt (trời quang), trắng = xấu (mây dày).
+_CSC_DAYS = 7
+_CSC_BG = (15, 23, 42)
+_CSC_DAY_COLORS = ["#facc15", "#f8fafc", "#f9a8d4", "#86efac", "#7dd3fc", "#fdba74", "#c4b5fd"]
+_CSC_CLOUD_STOPS = [(0, (10, 36, 99)), (20, (29, 78, 216)), (40, (59, 130, 246)),
+                    (60, (147, 197, 253)), (80, (219, 234, 254)), (100, (255, 255, 255))]
+_CSC_HUMID_STOPS = [(0, (10, 36, 99)), (30, (59, 130, 246)), (50, (34, 197, 94)),
+                    (70, (250, 204, 21)), (85, (249, 115, 22)), (100, (220, 38, 38))]
+_CSC_TEMP_STOPS = [(-10, (76, 29, 149)), (0, (37, 99, 235)), (8, (34, 211, 238)),
+                   (15, (34, 197, 94)), (22, (250, 204, 21)), (30, (249, 115, 22)), (38, (220, 38, 38))]
+
+def _csc_rgb(stops, v):
+    if v <= stops[0][0]:
+        return stops[0][1]
+    if v >= stops[-1][0]:
+        return stops[-1][1]
+    for (p0, c0), (p1, c1) in zip(stops, stops[1:]):
+        if v <= p1:
+            t = (v - p0) / float(p1 - p0)
+            return tuple(c0[i] + (c1[i] - c0[i]) * t for i in range(3))
+    return stops[-1][1]
+
+def _csc_hex(rgb, f=1.0):
+    return "#%02x%02x%02x" % tuple(int(max(0, min(255, rgb[i] * f + _CSC_BG[i] * (1.0 - f)))) for i in range(3))
+
+def _csc_dark_hex(sun_alt, moon_alt, moon_illum):
+    b = 1.0 if sun_alt >= 0 else max(0.0, (sun_alt + 18.0) / 18.0) ** 1.5
+    if moon_alt > 0:
+        b = max(b, (moon_illum / 100.0) * min(1.0, moon_alt / 25.0) * 0.55)
+    return "#%02x%02x%02x" % (int(15 + 240 * b), int(23 + 220 * b), int(42 + 150 * b))
+
+def _csc_get(hourly, field, idx, order, bare=True):
+    for sfx in order:
+        lst = hourly.get(f"{field}{sfx}", [])
+        if idx < len(lst) and lst[idx] is not None:
+            return float(lst[idx])
+    if bare:
+        lst = hourly.get(field, [])
+        if idx < len(lst) and lst[idx] is not None:
+            return float(lst[idx])
+    return None
+
+@st.cache_data(ttl=86400, show_spinner=False)
+def _csc_astro_grid(lat, lon, d0_str, utc_off_h, n_days):
+    d0 = datetime.strptime(d0_str, "%Y-%m-%d")
+    sun, moon = {}, {}
+    for d in range(n_days):
+        dd = d0 + timedelta(days=d)
+        for h in range(24):
+            sun[(d, h)] = calculate_exact_sun_altitude_ephem(lat, lon, dd.year, dd.month, dd.day, h, utc_off_h)
+            moon[(d, h)] = calculate_exact_moon_altitude_ephem(lat, lon, dd.year, dd.month, dd.day, h, utc_off_h)
+    return sun, moon
+
+def _csc_build_html(hourly, lat, lon, utc_off_s, target_dt, now_local):
+    times = hourly.get("time", []) if hourly else []
+    if not times:
+        return None
+    idx_of = {t: i for i, t in enumerate(times)}
+    d0 = datetime.strptime(times[0][:10], "%Y-%m-%d")
+    utc_off_h = utc_off_s / 3600.0
+    sun_g, moon_g = _csc_astro_grid(lat, lon, times[0][:10], utc_off_h, _CSC_DAYS)
+    illum = {d: get_moon_phase_percent(d0 + timedelta(days=d))[0] for d in range(_CSC_DAYS)}
+    cols = [(d, d0 + timedelta(days=d), h) for d in range(_CSC_DAYS) for h in range(24)]
+    n = len(cols)
+    ALL = ("_ecmwf_ifs025", "_gfs_seamless")
+
+    recs = []
+    for d, day, h in cols:
+        idx = idx_of.get(f"{day.strftime('%Y-%m-%d')}T{h:02d}:00")
+        r = {"cloud": None, "src": "", "gfs": None, "hum": None, "wind": None, "temp": None}
+        if idx is not None:
+            c_ecm = _csc_get(hourly, "cloud_cover", idx, ("_ecmwf_ifs025",), bare=False)
+            c_gfs = _csc_get(hourly, "cloud_cover", idx, ("_gfs_seamless",), bare=True)
+            if c_ecm is not None:
+                r["cloud"], r["src"] = c_ecm, "ECMWF"
+            elif c_gfs is not None:
+                r["cloud"], r["src"] = c_gfs, "GFS"
+            r["gfs"] = c_gfs
+            r["hum"] = _csc_get(hourly, "relative_humidity_2m", idx, ALL)
+            r["wind"] = _csc_get(hourly, "wind_speed_10m", idx, ALL)
+            r["temp"] = _csc_get(hourly, "temperature_2m", idx, ALL)
+        sa = sun_g.get((d, h), -90.0)
+        ma = moon_g.get((d, h), -90.0)
+        r["sun"], r["moon"] = sa, ma
+        r["dim"] = 1.0   # giữ đúng màu theo lượng mây (trước đây ban ngày bị pha tối -> ra màu xám)
+        recs.append(r)
+
+    def _tt(i):
+        _, day, h = cols[i]
+        return f"{day.month}/{day.day} {h:02d}:00"
+
+    def _edge(i):
+        d, day, h = cols[i]
+        b0 = datetime(day.year, day.month, day.day, h)
+        if b0 <= now_local < b0 + timedelta(hours=1):
+            return "box-shadow:inset 4px 0 0 0 #facc15;"
+        if h == 0 and d > 0:
+            return "box-shadow:inset 2px 0 0 0 #ef4444;"
+        return ""
+
+    hatch = "repeating-linear-gradient(45deg,#1e293b,#1e293b 2px,#334155 2px,#334155 3px)"
+    lab = "font-family:Consolas,'Courier New',monospace;font-size:11px;line-height:13px;color:#e2e8f0;white-space:nowrap;"
+
+    def _cell(i, bg, tip, h_px=13):
+        return f'<div title="{tip}" style="height:{h_px}px;background:{bg};{_edge(i)}"></div>'
+
+    def _na(i, name):
+        return _cell(i, hatch, f"{_tt(i)} {name}: n/a")
+
+    stick = "position:sticky;left:0;z-index:2;background:#000;"
+
+    def _row(label, cells, label_bg=""):
+        lb = f"background:{label_bg};color:#0f172a;padding:0 3px;" if label_bg else ""
+        return f'<div style="{lab}{stick}{lb}">{label}</div>' + "".join(cells)
+
+    p = [f'<div id="sc" style="overflow-x:auto;cursor:grab;user-select:none;"><div style="width:max(233.34%,1773px);box-sizing:border-box;background:#000;border:1px solid #334155;'
+         f'border-radius:10px;padding:8px 10px;">'
+         f'<div style="display:grid;grid-template-columns:104px repeat({n},minmax(0,1fr));column-gap:1px;row-gap:1px;">']
+
+    # Header: ngày + giờ
+    p.append(f'<div style="{lab}{stick}font-size:10px;color:#94a3b8;">Local Time</div>')
+    for d in range(_CSC_DAYS):
+        day = d0 + timedelta(days=d)
+        col = _CSC_DAY_COLORS[d % len(_CSC_DAY_COLORS)]
+        p.append(f'<div style="grid-column:span 24;{lab}color:{col};overflow:hidden;">'
+                 f'{day.strftime("%Y-%m-%d")} {day.strftime("%a")}</div>')
+    p.append(f'<div style="{stick}"></div>')
+    for d, day, h in cols:
+        col = _CSC_DAY_COLORS[d % len(_CSC_DAY_COLORS)]
+        txt = str(h) if h % 3 == 0 else ""
+        p.append(f'<div style="{lab}font-size:9px;line-height:12px;color:{col};overflow:visible;">{txt}</div>')
+
+    # Nhóm 1: bầu trời
+    cells = []
+    for i, r in enumerate(recs):
+        if r["cloud"] is None:
+            cells.append(_na(i, "Cloud"))
+        else:
+            cells.append(_cell(i, _csc_hex(_csc_rgb(_CSC_CLOUD_STOPS, r["cloud"]), r["dim"]),
+                               f'{_tt(i)} Cloud ({r["src"]}): {int(round(r["cloud"]))}%'))
+    p.append(_row("Cloud Cover:", cells))
+
+    cells = []
+    for i, r in enumerate(recs):
+        if r["gfs"] is None:
+            cells.append(_na(i, "GFS"))
+        else:
+            cells.append(_cell(i, _csc_hex(_csc_rgb(_CSC_CLOUD_STOPS, r["gfs"]), r["dim"]),
+                               f'{_tt(i)} GFS cloud: {int(round(r["gfs"]))}%'))
+    p.append(_row("GFS Cloud:", cells))
+
+    cells = []
+    for i, r in enumerate(recs):
+        if r["cloud"] is None:
+            cells.append(_na(i, "Transparency"))
+        else:
+            tr = 100 - r["cloud"] * 0.9 - max(0, (r["hum"] or 0) - 60) * 0.5
+            tr = max(0, min(100, tr))
+            cells.append(_cell(i, _csc_hex(_csc_rgb(_CSC_CLOUD_STOPS, 100 - tr), r["dim"]),
+                               f'{_tt(i)} Transparency: {int(round(tr))}%'))
+    p.append(_row("Transparency:", cells))
+
+    cells = []
+    for i, r in enumerate(recs):
+        if r["cloud"] is None:
+            cells.append(_na(i, "Seeing"))
+        else:
+            atm = max(0, min(100, 100 - max(0, (r["wind"] or 0) - 2) * 9))
+            se = atm * max(0, 100 - r["cloud"]) / 100.0
+            cells.append(_cell(i, _csc_hex(_csc_rgb(_CSC_CLOUD_STOPS, 100 - se), r["dim"]),
+                               f'{_tt(i)} Seeing: {int(round(se))}%'))
+    p.append(_row("Seeing:", cells))
+
+    cells = [_cell(i, _csc_dark_hex(r["sun"], r["moon"], illum.get(cols[i][0], 0.0)),
+                   f'{_tt(i)} sun {r["sun"]:.0f}° / moon {r["moon"]:.0f}°', 8)
+             for i, r in enumerate(recs)]
+    p.append(_row("Darkness:", cells, label_bg="#94a3b8"))
+
+    p.append('<div style="grid-column:1/-1;height:10px;"></div>')
+
+    # Nhóm 2: mặt đất
+    cells = []
+    for i, r in enumerate(recs):
+        if r["wind"] is None:
+            cells.append(_na(i, "Wind"))
+        else:
+            cells.append(_cell(i, _csc_hex(_csc_rgb(_CSC_CLOUD_STOPS, min(100, r["wind"] / 10.0 * 100))),
+                               f'{_tt(i)} Wind: {r["wind"]:.1f} m/s'))
+    p.append(_row("Wind:", cells))
+
+    cells = []
+    for i, r in enumerate(recs):
+        if r["hum"] is None:
+            cells.append(_na(i, "Humidity"))
+        else:
+            cells.append(_cell(i, _csc_hex(_csc_rgb(_CSC_HUMID_STOPS, r["hum"])),
+                               f'{_tt(i)} Humidity: {int(round(r["hum"]))}%'))
+    p.append(_row("Humidity:", cells))
+
+    cells = []
+    for i, r in enumerate(recs):
+        if r["temp"] is None:
+            cells.append(_na(i, "Temp"))
+        else:
+            cells.append(_cell(i, _csc_hex(_csc_rgb(_CSC_TEMP_STOPS, r["temp"])),
+                               f'{_tt(i)} Temperature: {r["temp"]:.1f}°C'))
+    p.append(_row("Temperature:", cells))
+
+    # Thanh đêm đang chọn (18:00 → 06:00)
+    sel_a = datetime(target_dt.year, target_dt.month, target_dt.day, 18)
+    sel_b = sel_a + timedelta(hours=12)
+    p.append('<div style="grid-column:1/-1;height:4px;"></div>')
+    p.append(f'<div style="{lab}{stick}font-size:10px;color:#fb923c;">Night</div>')
+    for d, day, h in cols:
+        b0 = datetime(day.year, day.month, day.day, h)
+        bg = "#fb923c" if (sel_a <= b0 < sel_b) else "transparent"
+        p.append(f'<div style="height:3px;background:{bg};"></div>')
+    p.append('</div>')  # grid
+
+    p.append('<div style="display:flex;flex-wrap:wrap;align-items:center;gap:10px;margin-top:8px;'
+             'font-size:10px;color:#94a3b8;font-family:sans-serif;">'
+             '<span>Clear (dark blue)</span><div style="width:90px;height:6px;border-radius:3px;'
+             'background:linear-gradient(90deg,#0a2463,#1d4ed8,#3b82f6,#93c5fd,#dbeafe,#ffffff);"></div>'
+             '<span>Overcast (white)</span>'
+             '<span><span style="color:#facc15;">|</span> now</span>'
+             '<span><span style="color:#ef4444;">|</span> midnight</span>'
+             '<span><span style="color:#fb923c;">&#9632;</span> selected night</span>'
+             '<span style="color:#64748b;">· drag ↔ to see days 4–7</span>'
+             '</div>')
+    p.append('</div></div>')
+    _sel_idx = next((i for i, (d, day, h) in enumerate(cols)
+                     if sel_a <= datetime(day.year, day.month, day.day, h) < sel_b), 0)
+    return "".join(p), _sel_idx, n
+
+st.markdown("---")
+st.markdown(f'### 🌌 Clear Sky Forecast "{_disp_name_html(st.session_state.location_name)}" (7 days)', unsafe_allow_html=True)
+_csc_now_local = datetime.now(timezone.utc).replace(tzinfo=None) + timedelta(seconds=_loc_utc_offset)
+_csc_res = _csc_build_html(hourly_data, st.session_state.lat, st.session_state.lon,
+                           _loc_utc_offset, target_date, _csc_now_local)
+if _csc_res:
+    import streamlit.components.v1 as _csc_components
+    _csc_html, _csc_sel, _csc_n = _csc_res
+    _csc_doc = (
+        '<!DOCTYPE html><html><head><meta charset="utf-8"><style>'
+        'html,body{margin:0;padding:0;background:transparent;}'
+        '#sc{scrollbar-width:thin;scrollbar-color:#475569 #0f172a;}'
+        '#sc::-webkit-scrollbar{height:8px;}#sc::-webkit-scrollbar-thumb{background:#475569;border-radius:4px;}'
+        '</style></head><body>' + _csc_html +
+        '<script>(function(){var sc=document.getElementById("sc");if(!sc)return;'
+        'var down=false,sx=0,sl=0;'
+        'sc.addEventListener("mousedown",function(e){down=true;sx=e.pageX;sl=sc.scrollLeft;sc.style.cursor="grabbing";});'
+        'window.addEventListener("mouseup",function(){down=false;sc.style.cursor="grab";});'
+        'window.addEventListener("mousemove",function(e){if(!down)return;e.preventDefault();sc.scrollLeft=sl-(e.pageX-sx);});'
+        'var SEL=' + str(int(_csc_sel)) + ',N=' + str(int(_csc_n)) + ';'
+        'if(SEL>=60){sc.scrollLeft=Math.max(0,SEL/N*sc.scrollWidth-sc.clientWidth*0.25);}'
+        '})();</script></body></html>')
+    _csc_components.html(_csc_doc, height=255)
+else:
+    st.caption("Clear Sky Forecast: weather data unavailable.")
+
 # ── MOON + SUN + MILKY WAY ALTITUDE CHART ────────────────────────────────────
 st.markdown("---")
 st.markdown("### 📊 Moon, Sun & Milkyway Altitude (°)")
@@ -4063,7 +4379,7 @@ fig.add_trace(go.Scatter(
     x=_x_positions, y=moon_altitudes,
     mode='lines',
     name='🌙 Moon',
-    line=dict(color='#fbbf24', width=2.5),
+    line=dict(color='#fbbf24', width=4),
     fill='tozeroy',
     fillcolor='rgba(251,191,36,0.20)',
     hovertemplate='%{customdata}<br>Moon: %{y:.1f}°<extra></extra>',
@@ -4075,7 +4391,7 @@ fig.add_trace(go.Scatter(
     x=_x_positions, y=sun_altitudes,
     mode='lines',
     name='☀️ Sun',
-    line=dict(color='#38bdf8', width=2.5, dash='dash'),
+    line=dict(color='#38bdf8', width=4, dash='dash'),
     hovertemplate='%{customdata}<br>Sun: %{y:.1f}°<extra></extra>',
     customdata=hours_labels,
 ))
@@ -4085,16 +4401,16 @@ fig.add_trace(go.Scatter(
     x=_x_positions, y=milkyway_altitudes,
     mode='lines',
     name='🌌 Milkyway',
-    line=dict(color='#a78bfa', width=2.0, dash='dot'),
+    line=dict(color='#a78bfa', width=3.5, dash='dash'),
     hovertemplate='%{customdata}<br>Milkyway: %{y:.1f}°<extra></extra>',
     customdata=hours_labels,
 ))
 
 # ── Horizon rule ──────────────────────────────────────────────────────────────
-fig.add_hline(y=0, line=dict(color='#475569', dash='dot', width=1))
+fig.add_hline(y=0, line=dict(color='#64748b', dash='dot', width=1.5))
 
 # ── -13° rule ─────────────────────────────────────────────────────────────────
-fig.add_hline(y=-13, line=dict(color='rgba(251,146,60,0.50)', dash='dot', width=1),
+fig.add_hline(y=-13, line=dict(color='rgba(251,146,60,0.70)', dash='dot', width=1.5),
               annotation_text="−13°", annotation_font_color="rgba(251,146,60,0.7)",
               annotation_position="bottom right")
 
@@ -4109,11 +4425,13 @@ fig.update_layout(
         tickvals=_x_positions,
         ticktext=hours_labels,
         gridcolor='rgba(71,85,105,0.3)',
+        fixedrange=True,
     ),
     yaxis=dict(
         gridcolor='rgba(71,85,105,0.3)',
         title=None,
         zeroline=False,
+        fixedrange=True,
     ),
     legend=dict(
         orientation='h', yanchor='bottom', y=1.02, xanchor='left', x=0,
@@ -4122,9 +4440,12 @@ fig.update_layout(
     ),
     margin=dict(l=50, r=20, t=40, b=40),
     hovermode='x unified',
+    dragmode=False,
 )
 
-st.plotly_chart(fig, use_container_width=True)
+st.plotly_chart(fig, use_container_width=True,
+                config={'displayModeBar': False, 'scrollZoom': False, 'doubleClick': False,
+                        'showAxisDragHandles': False})
 
 # Legend note
 
@@ -4134,3 +4455,7 @@ st.plotly_chart(fig, use_container_width=True)
 
 # ── FOOTER ────────────────────────────────────────────────────────────────────
 st.markdown('<div class="footer-copyright">© Copyright: fcbzune</div>', unsafe_allow_html=True)
+
+# ── TODAY HIGHLIGHT: tính sau cùng để trang hiện ra trước ─────────────────────
+if "_th_render" in globals():
+    _th_render()
