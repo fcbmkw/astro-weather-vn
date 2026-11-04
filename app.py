@@ -2101,18 +2101,9 @@ def _astro_ai_close():
     st.session_state._ai_rings = []
     st.session_state._ai_panel = []
 
-st.markdown(
-    """
-    <style>
-    div[class*="st-key-astro_ai_answer_box"] { position: relative; padding-right: 36px !important; }
-    div[class*="st-key-astro_ai_close"] { position: absolute; top: 6px; right: 8px; width: auto !important; z-index: 5; }
-    div[class*="st-key-astro_ai_close"] button { min-height: 0 !important; height: 26px !important; width: 26px !important;
-        padding: 0 !important; line-height: 1 !important; border-radius: 6px !important; }
-    </style>
-    """,
-    unsafe_allow_html=True,
-)
 
+_AI_X_HTML = ('<span class="mkw-x" data-close="chat" title="Close" style="float:right;margin:0 0 4px 8px;'
+              'pointer-events:auto;cursor:pointer;color:#94a3b8;font-size:14px;line-height:1;">✕</span>')
 _ai_panel = st.container()
 with _ai_panel:
     _ai_question = st.chat_input(
@@ -2124,8 +2115,7 @@ with _ai_panel:
     with _astro_chat_box:
         _answer_slot = st.empty()
         if st.session_state.get("astro_ai_answer"):
-            _answer_slot.markdown(st.session_state.astro_ai_answer)
-            st.button("✕", key="astro_ai_close", help="Close AI result", on_click=_astro_ai_close)
+            _answer_slot.markdown(_AI_X_HTML + st.session_state.astro_ai_answer, unsafe_allow_html=True)
 
 # --- LOGIC XỬ LÝ ---
 if _ai_question and _ai_question.strip():
@@ -3957,14 +3947,32 @@ if st.session_state._scan_result is not None:
     st.button("x", key="mkw_close_scan", on_click=_mkw_close_scan)
 if st.session_state.get("_ai_panel"):
     st.button("x", key="mkw_close_ai", on_click=_mkw_close_ai)
+if st.session_state.get("astro_ai_answer"):
+    st.button("x", key="mkw_close_chat", on_click=_astro_ai_close)
 import streamlit.components.v1 as _mkw_comp
 _mkw_comp.html("""<script>
-(function(){try{var P=window.parent;if(P.__mkwXInstalled)return;P.__mkwXInstalled=true;
-P.document.addEventListener('click',function(e){
-  var x=e.target&&e.target.closest?e.target.closest('.mkw-x'):null;if(!x)return;
-  var b=P.document.querySelector('.st-key-mkw_close_'+x.getAttribute('data-close')+' button');
-  if(b){e.preventDefault();e.stopPropagation();b.click();}
-},true);}catch(err){}})();
+(function(){try{
+  var P = window.parent, D = P.document;
+  if (P.__mkwXh) D.removeEventListener('click', P.__mkwXh, true);   // bản cũ (nếu có) bị thay bằng bản mới
+  var h = function(e){
+    var x = e.target, n = 0;
+    while (x && n < 3) {
+      var isX = (x.classList && x.classList.contains('mkw-x')) ||
+        (x.children && x.children.length === 0 && (x.textContent || '').trim() === '✕' &&
+         P.getComputedStyle(x).pointerEvents === 'auto' && !(x.closest && x.closest('button')));
+      if (isX) break;
+      x = x.parentElement; n++;
+    }
+    if (!x || n >= 3) return;
+    var k;
+    if (x.closest('[class*="st-key-astro_ai_answer_box"]')) k = 'chat';
+    else { var w = x.parentElement; k = (w && (w.textContent || '').indexOf('AI picks') >= 0) ? 'ai' : 'scan'; }
+    var b = D.querySelector('.st-key-mkw_close_' + k + ' button');
+    console.log('[mkw] close', k, !!b);
+    if (b) { e.preventDefault(); e.stopPropagation(); b.click(); }
+  };
+  P.__mkwXh = h; D.addEventListener('click', h, true);
+}catch(err){ console.log('[mkw] bridge error', err); }})();
 </script>""", height=0)
 
 # ── LPM EXTERNAL LINK ─────────────────────────────────────────────────────────
