@@ -2553,6 +2553,40 @@ _COMBINED_CTRL_TEMPLATE = Template("""
         _himStart(himIdx);
       });
 
+      // ── Auto-refresh: đọc lại targetTimes mỗi 5 phút (và khi quay lại tab/cửa sổ) để bản đồ mở lâu
+      // vẫn hiện khung mây mới nhất. Chỉ thay khung khi có ảnh MỚI HƠN; tái dùng layer của khung còn lại.
+      var HIM_REFRESH_MS = 5 * 60 * 1000;
+      var himLastRef = 0;
+      function _himRefresh(force) {
+        if (!himFrames.length) return;                        // không ở tab Himawari / đang tải lần đầu
+        var nowMs = Date.now();
+        if (!force && nowMs - himLastRef < 30000) return;     // gộp các sự kiện timer/visibility/focus liên tiếp
+        himLastRef = nowMs;
+        var tok = himTok;
+        _himLoadTimes(function(list) {
+          if (tok !== himTok || !list.length || !himFrames.length) return;
+          if (list[list.length - 1].v <= himFrames[himFrames.length - 1].v) return;   // chưa có ảnh mới
+          var old = {}, keep = {};
+          himFrames.forEach(function(f) { old[f.v] = f; });
+          var nf = list.map(function(t) {
+            var o = old[t.v];
+            if (o) { keep[t.v] = 1; return o; }
+            return { b: t.b, v: t.v, layer: null };
+          });
+          himFrames.forEach(function(f) { if (!keep[f.v] && f.layer) { map.removeLayer(f.layer); } });
+          var wasPlaying = himPlaying;
+          _himStop();
+          himFrames = nf;
+          himFrames.forEach(function(f) { _himEnsure(f); });
+          if (wasPlaying) { _himStart(Math.min(himIdx, himFrames.length - 1)); }
+          else { _himShow(himFrames.length - 1); }
+        });
+      }
+      setInterval(function() { _himRefresh(false); }, HIM_REFRESH_MS);
+      document.addEventListener('visibilitychange', function() { if (!document.hidden) { _himRefresh(false); } });
+      window.addEventListener('focus', function() { _himRefresh(false); });
+      window.addEventListener('online', function() { _himRefresh(true); });
+
       function switchTile(mode) {
         var mapEl = map.getContainer();
         var prevMode = _lsGet(LS_TILE, null);
