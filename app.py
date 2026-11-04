@@ -189,7 +189,8 @@ for k, v in [("lat", 21.0285), ("lon", 105.8542),
              ("map_tile", "himawari"),
              ("_need_fly", False), ("_skip_prefetch", False),
              ("_scan_result", None), ("_scan_days", 0), ("_scan_scanning", False), ("_scan_region", "bac"), ("_scan_best", False),
-             ("_scan_tonight", False), ("_scan_fallback_label", None)]:
+             ("_scan_tonight", False), ("_scan_fallback_label", None),
+             ("_ai_rings", []), ("_ai_panel", [])]:
     if k not in st.session_state:
         st.session_state[k] = v
 
@@ -1243,7 +1244,7 @@ def _run_great_night_scan(start_day=0, region="bac"):
 # Ưu tiên cuối tuần (Fri=4, Sat=5, Sun=6). Weekday (Mon-Thu) hiển thị màu trắng.
 _WEEKEND_DAYS = {4, 5, 6}  # weekday(): Mon=0..Sun=6; Fri=4, Sat=5, Sun=6
 
-def _run_best_scan(region="bac"):
+def _run_best_scan(region="bac", limit=3):
     """Quét 7 ngày tới cho 1 vùng địa lý (region key, hoặc 'vietnam' = toàn quốc), trả về top 3 (dedupe <60km).
     - Ưu tiên cuối tuần (Fri/Sat/Sun) trước Mon-Thu.
     - Trong cùng tier + streak: ưu tiên cuối tuần, rồi streak dài hơn.
@@ -1308,7 +1309,7 @@ def _run_best_scan(region="bac"):
             continue
         seen_coords.append(loc_coords)
         top3.append((d, day_off, loc_name, loc_coords, verdict, moon_illum))
-        if len(top3) == 3:
+        if len(top3) >= limit:
             break
 
     # Guarantee at least 1 weekend in top3
@@ -1352,7 +1353,7 @@ def _run_best_scan(region="bac"):
     }
 
 # ── TONIGHT SCAN — quét đêm nay (day_off=0) cho Kanto hoặc toàn quốc ────────
-def _run_tonight_scan(region="bac"):
+def _run_tonight_scan(region="bac", limit=3):
     """Quét đêm nay (day_off=0) và trả về top3 địa điểm tốt nhất màu pink, cho 1 vùng địa lý.
     region='vietnam' → 100 địa điểm toàn quốc, khác → vùng tương ứng (dedupe <60km).
     - Không yêu cầu moon < 35% (tonight hiển thị kết quả dù trăng sáng).
@@ -1409,7 +1410,7 @@ def _run_tonight_scan(region="bac"):
             continue
         seen_coords.append(loc_coords)
         top3.append((d, day_off, loc_name, loc_coords, verdict, moon_illum, False))
-        if len(top3) == 3:
+        if len(top3) >= limit:
             break
 
     if not top3:
@@ -1466,14 +1467,14 @@ def _serialize_scan_result(result):
                 result["verdict"], result["moon_illum"], is_weekend_best)
 
     alternatives = []
-    for row in top3[1:3]:
+    for row in top3[1:]:
         d, day_off, loc_name, loc_coords, verdict, moon_illum, is_weekend = row
         alternatives.append(_one(d, day_off, loc_name, loc_coords, verdict, moon_illum, is_weekend))
 
     return {"found": True, "best": best, "alternatives": alternatives}
 
 
-def tool_scan_best_weekend(region: str = "bac") -> dict:
+def tool_scan_best_weekend(region: str = "bac", top_n: int = 3) -> dict:
     """Tìm địa điểm và ngày chụp ảnh sao TỐT NHẤT trong 7 ngày tới, ưu tiên cuối tuần
     (Thứ 6/7/Chủ Nhật). Dùng khi user hỏi mơ hồ về thời gian: 'cuối tuần này',
     'tuần này', 'vài ngày tới', hoặc không nói rõ đêm nào.
@@ -1482,25 +1483,29 @@ def tool_scan_best_weekend(region: str = "bac") -> dict:
         region: vùng địa lý Việt Nam cần quét. Phải là một trong:
             'bac', 'trung', 'nam', 'vietnam' (vietnam = toàn quốc, chậm hơn).
             Mặc định 'bac' nếu user không nói rõ vùng nào.
+        top_n: số địa điểm cần trả về (1-5, mặc định 3). Khi user yêu cầu N địa điểm
+            (vd '5 điểm', '4 chỗ') thì truyền top_n=N.
 
     Returns:
         dict: {"found": true, "best": {...}, "alternatives": [...]}
         hoặc {"found": false, "reason": "..."} nếu không có đêm nào đủ đẹp.
     """
-    return _serialize_scan_result(_run_best_scan(region=region))
+    return _serialize_scan_result(_run_best_scan(region=region, limit=max(1, min(5, int(top_n or 3)))))
 
 
-def tool_scan_tonight(region: str = "bac") -> dict:
+def tool_scan_tonight(region: str = "bac", top_n: int = 3) -> dict:
     """Kiểm tra điều kiện chụp ảnh sao ĐÊM NAY (chỉ đêm nay, không phải ngày khác)
     cho 1 vùng địa lý. Dùng khi user hỏi cụ thể 'tối nay', 'đêm nay'.
 
     Args:
         region: vùng địa lý, cùng danh sách như tool_scan_best_weekend. Mặc định 'bac'.
+        top_n: số địa điểm cần trả về (1-5, mặc định 3). Khi user yêu cầu N địa điểm
+            (vd '5 điểm', '4 chỗ') thì truyền top_n=N.
 
     Returns:
         dict cùng cấu trúc như tool_scan_best_weekend, nhưng chỉ xét đêm nay.
     """
-    return _serialize_scan_result(_run_tonight_scan(region=region))
+    return _serialize_scan_result(_run_tonight_scan(region=region, limit=max(1, min(5, int(top_n or 3)))))
 
 
 def tool_check_location_darkness(location_name: str) -> dict:
@@ -1613,6 +1618,8 @@ def ask_astro_ai(user_question: str):
 
     Trả về tuple (answer_text: str, fly_to: dict|None).
     """
+    st.session_state._ai_rings = []     # mỗi câu hỏi mới → bỏ vòng tròn của câu trước
+    st.session_state._ai_panel = []
     now_ict = datetime.now(timezone(timedelta(hours=7)))
     system_prompt = (
         f"Hôm nay là {now_ict.strftime('%A, %Y-%m-%d')} (giờ Việt Nam, ICT). "
@@ -1632,6 +1639,8 @@ def ask_astro_ai(user_question: str):
         "-> gọi tool_scan_tonight.\n"
         "- Nếu chỉ hỏi độ tối bầu trời (Bortle) của 1 nơi, không liên quan thời tiết "
         "-> gọi tool_check_location_darkness.\n"
+        "- Nếu user yêu cầu N địa điểm (vd '5 điểm', '4 chỗ') -> gọi tool_scan_* với top_n=N (tối đa 5) "
+        "và chỉ nêu đúng các địa điểm tool trả về, không tự thêm địa điểm khác.\n"
         "- LUÔN gọi ít nhất 1 tool trước khi trả lời, không được tự bịa thời tiết/"
         "địa điểm/toạ độ.\n\n"
         "Trả lời ngắn gọn (3-5 câu), thân thiện, bằng tiếng Việt. Nếu địa điểm ban "
@@ -1701,6 +1710,22 @@ def ask_astro_ai(user_question: str):
     st.session_state.astro_ai_history = contents + [
         {"role": "model", "parts": [{"text": answer_text}]}
     ]
+
+    # ── Vòng tròn nhấp nháy cho các địa điểm AI vừa đề xuất (kết quả tool cuối cùng) ──
+    _shown = []
+    _rd = last_result["data"]
+    if _rd:
+        _cands = [_rd] if "lat" in _rd else [c for c in [_rd.get("best")] + list(_rd.get("alternatives", [])) if c]
+        _shown = [c for c in _cands if "lat" in c]
+    st.session_state._ai_rings = [[c.get("matched_name") or c.get("location_name") or "", c["lat"], c["lon"]]
+                                  for c in _shown]
+    if _shown:
+        # Chỉ giữ MỘT bên: AI vừa ra kết quả → tắt kết quả cũ của Search Location.
+        st.session_state._scan_result = None
+        st.session_state._scan_best = False
+        st.session_state._scan_tonight = False
+        st.session_state._scan_fallback_label = None
+        st.session_state._scan_scanning = False
 
     fly_to = None
     data = last_result["data"]
@@ -2043,6 +2068,25 @@ _placeholder_text = st.session_state.get(
     "Hỏi AI tìm địa điểm & thời điểm chụp ảnh milkyway...",
 )
 
+
+def _astro_ai_close():
+    """Nút ✕ của khung kết quả AI: xoá câu trả lời + vòng tròn/bảng AI trên bản đồ."""
+    st.session_state.astro_ai_answer = None
+    st.session_state._ai_rings = []
+    st.session_state._ai_panel = []
+
+st.markdown(
+    """
+    <style>
+    div[class*="st-key-astro_ai_answer_box"] { position: relative; padding-right: 36px !important; }
+    div[class*="st-key-astro_ai_close"] { position: absolute; top: 6px; right: 8px; width: auto !important; z-index: 5; }
+    div[class*="st-key-astro_ai_close"] button { min-height: 0 !important; height: 26px !important; width: 26px !important;
+        padding: 0 !important; line-height: 1 !important; border-radius: 6px !important; }
+    </style>
+    """,
+    unsafe_allow_html=True,
+)
+
 _ai_panel = st.container()
 with _ai_panel:
     _ai_question = st.chat_input(
@@ -2055,6 +2099,7 @@ with _ai_panel:
         _answer_slot = st.empty()
         if st.session_state.get("astro_ai_answer"):
             _answer_slot.markdown(st.session_state.astro_ai_answer)
+            st.button("✕", key="astro_ai_close", help="Close AI result", on_click=_astro_ai_close)
 
 # --- LOGIC XỬ LÝ ---
 if _ai_question and _ai_question.strip():
@@ -2222,7 +2267,7 @@ _COMBINED_CTRL_TEMPLATE = Template("""
       };
       // lat=89.65 → "off": tắt banner/ring ngay, không load data
       window._triggerOff = function() {
-        map.fire('click', { latlng: L.latLng(89.65, 100) });
+        map.fire('click', { latlng: L.latLng(89.65, 100 + (Date.now() % 100000) / 1e7) });
       };
       // lat=89.55 → mkw scan  (lng=200+day_off*0.01, day_off=days-1 for days 1-6, 0 for days=0)
       window._triggerMkwScan = function(days) {
@@ -2746,6 +2791,21 @@ _SEARCH_CTRL_TEMPLATE = Template("""
         inp.focus();
       });
 
+      {% if this.has_results %}
+      // ── Nút ✕ đóng kết quả (Search location / AI) + xoá vòng tròn nhấp nháy ──
+      var _closeRes = L.DomUtil.create('div', '', wrapper);
+      _closeRes.innerHTML = '&#10005;&nbsp;Close results';
+      _closeRes.title = 'Close results and remove the blinking circles';
+      _closeRes.style.cssText = ('margin-top:4px;display:inline-block;cursor:pointer;'
+        + 'background:rgba(15,23,42,0.92);border:1px solid #475569;border-radius:8px;'
+        + 'padding:3px 9px;color:#e2e8f0;font-size:11px;font-weight:600;'
+        + 'box-shadow:0 2px 8px rgba(0,0,0,0.6);');
+      L.DomEvent.on(_closeRes, 'click', function(e){
+        L.DomEvent.stop(e);
+        if (typeof window._triggerOff === 'function') window._triggerOff();
+      });
+      {% endif %}
+
       // ── Dropdown ───────────────────────────────────────────────────────────
       var dropdown = L.DomUtil.create('div', '', wrapper);
       dropdown.style.cssText = (
@@ -3223,14 +3283,16 @@ _SEARCH_CTRL_TEMPLATE = Template("""
 """)
 
 class _SearchControl(MacroElement):
-    def __init__(self, loc_list="[]", alias_dict="{}"):
+    def __init__(self, loc_list="[]", alias_dict="{}", has_results=False):
         super().__init__()
         self._name = '_SearchControl'
+        self.has_results = bool(has_results)
         self._template = _SEARCH_CTRL_TEMPLATE
         self.loc_list = loc_list
         self.alias_dict = alias_dict
 
-_SearchControl(loc_list=_loc_js_list, alias_dict=_kanji_alias_js).add_to(m)
+_SearchControl(loc_list=_loc_js_list, alias_dict=_kanji_alias_js,
+               has_results=bool(st.session_state._scan_result is not None or st.session_state.get("_ai_rings"))).add_to(m)
 
 # ── CSS cho tooltip (hover) ────────────────────────────────────────────────────
 m.get_root().html.add_child(folium.Element("""
@@ -3407,6 +3469,42 @@ if _selected_marker_args:
 is_bookmark = any(abs(c[0]-st.session_state.lat)<0.001 and abs(c[1]-st.session_state.lon)<0.001
                   for c in LOCATION_DATABASE.values())
 
+# ── Ring helpers (dùng chung cho Scan + AI) ──────────────────────────────────
+_ring_css = (
+    '<style>'
+    '@keyframes great-night-pulse {'
+    '0%{transform:translate(-50%,-50%) scale(0.6);opacity:0.9;}'
+    '70%{transform:translate(-50%,-50%) scale(2.2);opacity:0;}'
+    '100%{transform:translate(-50%,-50%) scale(0.6);opacity:0;}}'
+    '.great-night-ring{pointer-events:none!important;overflow:visible!important;}'
+    '</style>'
+)
+
+def _make_ring_div(color, shadow):
+    return (
+        '<div style="position:absolute;top:0;left:0;'
+        'width:64px;height:64px;border-radius:50%;'
+        f'border:3px solid {color};'
+        f'box-shadow:0 0 14px {shadow};'
+        'animation:great-night-pulse 1.8s ease-out infinite;'
+        'pointer-events:none;"></div>'
+    )
+
+def _add_rings(locations, color, shadow, css_already_injected=False):
+    """Render ring markers for a list of (lat,lon) or (name,coords,verdict) entries."""
+    ring_div = _make_ring_div(color, shadow)
+    for _i, entry in enumerate(locations):
+        coords = entry[1] if isinstance(entry[0], str) else list(entry)
+        _html = (_ring_css if (_i == 0 and not css_already_injected) else "") + ring_div
+        folium.Marker(
+            list(coords),
+            icon=folium.DivIcon(
+                html=_html,
+                icon_size=(0, 0), icon_anchor=(0, 0),
+                class_name="great-night-ring"),
+        ).add_to(m)
+    return True
+
 # ── GREAT NIGHT SCAN result — vòng tròn nhấp nháy quanh tất cả địa điểm ──────
 # Kích thước cố định theo pixel (DivIcon) → không thay đổi khi zoom in/out.
 _scan_r = st.session_state._scan_result
@@ -3476,6 +3574,12 @@ if _scan_r and _scan_r != "none":
         # Scan command: vẽ vòng tròn xanh cho tất cả địa điểm PERFECT NIGHT
         _all_locs = _scan_r.get("all_locs", [(_scan_r["loc_name"], _scan_r["loc_coords"], _scan_r["verdict"])])
         _add_rings(_all_locs, "#6ee7b7", "rgba(110,231,183,0.8)")
+
+# ── AI CHAT result — vòng tròn nhấp nháy (xanh lơ) quanh các địa điểm AI vừa đề xuất ──
+_ai_ring_locs = st.session_state.get("_ai_rings") or []
+if _ai_ring_locs:
+    _add_rings([(_n, (_la, _lo)) for _n, _la, _lo in _ai_ring_locs],
+               "#67e8f9", "rgba(103,232,249,0.85)")
 
 if not is_bookmark:
     folium.Marker(
@@ -3790,6 +3894,11 @@ if map_data:
     _is_mkw_scan_trig = abs(_lc_lat - 89.55) < 0.02
     _is_mkw_best_trig = abs(_lc_lat - 89.45) < 0.02
     _is_region_scan_trig = abs(_lc_lat - 89.35) < 0.02
+    if lc and lc != st.session_state._last_lc and (
+            _is_best_trig or _is_tonight_trig or _is_off_trig or
+            _is_mkw_scan_trig or _is_mkw_best_trig or _is_region_scan_trig):
+        st.session_state._ai_rings = []   # Search box scan/off → bỏ vòng tròn của AI
+        st.session_state._ai_panel = []
     if _is_mkw_scan_trig and lc and lc != st.session_state._last_lc:
         _d = max(0, min(6, round((_lc_lng - 200.0) * 100)))
         st.session_state._last_lc = lc
