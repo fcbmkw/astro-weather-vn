@@ -1610,6 +1610,31 @@ def tool_check_location_tonight(location_name: str) -> dict:
     }
 
 
+_EN_WD_AI = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
+
+def _ai_panel_row(c):
+    """Một dòng của bảng tóm tắt AI trên bản đồ (từ dict candidate/tool): tên, ngày, sao, mây, trăng, Bortle."""
+    short, _, pref = _disp_name(c.get("matched_name") or c.get("location_name") or "").partition(",")
+    d = None
+    try:
+        if c.get("date"):
+            d = datetime.strptime(str(c["date"])[:10], "%Y-%m-%d")
+        elif c.get("sky_tier") is not None:          # tool tra cứu 1 địa điểm cho đêm nay
+            d = _night_base_ict.replace(tzinfo=None)
+    except Exception:
+        d = None
+    bortle = c.get("bortle_class")
+    if bortle is None and "lat" in c:
+        try:
+            bortle = calculate_accurate_bortle(c["lat"], c["lon"])[0]
+        except Exception:
+            bortle = None
+    return {"name": short.strip(), "pref": pref.strip(),
+            "date": f"{d.month}/{d.day} {_EN_WD_AI[d.weekday()]}" if d else "",
+            "tier": c.get("sky_tier"), "stars": c.get("stars") or "",
+            "detail": c.get("detail") or "", "moon": c.get("moon_illumination_pct"),
+            "wk": bool(c.get("is_weekend")), "bortle": bortle}
+
 def ask_astro_ai(user_question: str):
     """Gửi câu hỏi tới Gemini KÈM LỊCH SỬ hội thoại (st.session_state.astro_ai_history)
     để AI nhớ ngữ cảnh câu trước (vd hỏi tiếp 'thế cuối tuần thì sao' sau khi đã hỏi
@@ -1719,6 +1744,7 @@ def ask_astro_ai(user_question: str):
         _shown = [c for c in _cands if "lat" in c]
     st.session_state._ai_rings = [[c.get("matched_name") or c.get("location_name") or "", c["lat"], c["lon"]]
                                   for c in _shown]
+    st.session_state._ai_panel = [_ai_panel_row(c) for c in _shown]
     if _shown:
         # Chỉ giữ MỘT bên: AI vừa ra kết quả → tắt kết quả cũ của Search Location.
         st.session_state._scan_result = None
@@ -2791,21 +2817,6 @@ _SEARCH_CTRL_TEMPLATE = Template("""
         inp.focus();
       });
 
-      {% if this.has_results %}
-      // ── Nút ✕ đóng kết quả (Search location / AI) + xoá vòng tròn nhấp nháy ──
-      var _closeRes = L.DomUtil.create('div', '', wrapper);
-      _closeRes.innerHTML = '&#10005;&nbsp;Close results';
-      _closeRes.title = 'Close results and remove the blinking circles';
-      _closeRes.style.cssText = ('margin-top:4px;display:inline-block;cursor:pointer;'
-        + 'background:rgba(15,23,42,0.92);border:1px solid #475569;border-radius:8px;'
-        + 'padding:3px 9px;color:#e2e8f0;font-size:11px;font-weight:600;'
-        + 'box-shadow:0 2px 8px rgba(0,0,0,0.6);');
-      L.DomEvent.on(_closeRes, 'click', function(e){
-        L.DomEvent.stop(e);
-        if (typeof window._triggerOff === 'function') window._triggerOff();
-      });
-      {% endif %}
-
       // ── Dropdown ───────────────────────────────────────────────────────────
       var dropdown = L.DomUtil.create('div', '', wrapper);
       dropdown.style.cssText = (
@@ -3673,6 +3684,60 @@ if _verdict:
 # Dùng cùng cơ chế margin-top âm như top-center label (đã được xác nhận hoạt động).
 # Map height=575. top-center dùng margin-top=-644, position:absolute;top:40px.
 # Bottom-left: margin-top=-644 + position:absolute;top:505px (575-56px banner-14px padding)
+# ── AI SUMMARY PANEL — bảng tóm tắt các địa điểm AI đề xuất (overlay góc dưới-trái bản đồ) ──
+# Cùng cơ chế margin-top âm như banner Scan; neo đáy (translateY(-100%)) nên cao bao nhiêu cũng không tràn.
+_ai_rows = st.session_state.get("_ai_panel") or []
+if _ai_rows:
+    import html as _aih
+    _AI_TIER_CLR = {"PERFECT NIGHT": "#6ee7b7", "GOOD STARRY NIGHT": "#fcd34d"}
+    _AI_RANK = ["🥇", "🥈", "🥉"]
+    _ai_parts = []
+    for _i, _r in enumerate(_ai_rows):
+        _bits = []
+        if _r.get("tier"):
+            _bits.append(f'<span style="color:{_AI_TIER_CLR.get(_r["tier"], "#94a3b8")};font-weight:700;">'
+                         f'{_aih.escape(str(_r["tier"]))}</span>')
+        if _r.get("detail"):
+            _bits.append(_aih.escape(str(_r["detail"])))
+        if _r.get("moon") is not None:
+            _bits.append(f'🌙 {float(_r["moon"]):.0f}%')
+        if _r.get("bortle") is not None:
+            try:
+                _bits.append(f'Bortle {float(_r["bortle"]):g}')
+            except (TypeError, ValueError):
+                pass
+        _bdr = "" if _i == len(_ai_rows) - 1 else "border-bottom:1px solid rgba(103,232,249,0.20);"
+        _ai_parts.append(
+            f'<div style="padding:5px 0;{_bdr}">'
+            f'<div style="display:flex;align-items:center;gap:8px;">'
+            f'<span style="font-size:15px;flex-shrink:0;">{_AI_RANK[_i] if _i < 3 else "▪"}</span>'
+            f'<span style="color:#a5f3fc;font-weight:700;font-size:13px;flex:1;overflow:hidden;'
+            f'text-overflow:ellipsis;white-space:nowrap;">{_aih.escape(_r.get("name", ""))}'
+            f'<span style="color:#64748b;font-weight:500;font-size:10px;"> {_aih.escape(_r.get("pref", ""))}</span></span>'
+            f'<span style="color:{"#fcd34d" if _r.get("wk") else "#94a3b8"};font-size:11px;flex-shrink:0;">{_aih.escape(_r.get("date", ""))}</span>'
+            f'<span style="color:#fbbf24;font-size:12px;flex-shrink:0;">{_aih.escape(str(_r.get("stars", "")))}</span>'
+            f'</div>'
+            f'<div style="color:#94a3b8;font-size:10px;margin:2px 0 0 23px;line-height:1.35;">{" · ".join(_bits)}</div>'
+            f'</div>')
+    st.markdown(f"""
+<div style="position:relative;margin-top:-644px;height:0;overflow:visible;z-index:9998;pointer-events:none;">
+<div style="
+  position:absolute;top:584px;left:2px;transform:translateY(-100%);
+  width:340px;max-width:calc(100% - 12px);
+  background:rgba(4,22,32,0.95);border:1.5px solid rgba(103,232,249,0.80);
+  border-radius:10px;padding:8px 12px;
+  font-family:sans-serif;
+  box-shadow:0 2px 16px rgba(0,0,0,0.75);backdrop-filter:blur(3px);
+  pointer-events:none;
+">
+<span class="mkw-x" data-close="ai" title="Close" style="position:absolute;top:3px;right:6px;pointer-events:auto;cursor:pointer;color:#cbd5e1;font-size:13px;line-height:1;font-family:sans-serif;padding:2px 4px;">✕</span>
+<div style="color:#67e8f9;font-size:10px;font-weight:700;letter-spacing:0.5px;margin-bottom:4px;">
+🤖 AI picks — summary
+</div>
+{"".join(_ai_parts)}
+</div>
+</div>""", unsafe_allow_html=True)
+
 _scan_r2 = st.session_state._scan_result
 
 if _scan_r2 and _scan_r2 != "none":
@@ -3723,6 +3788,7 @@ if _scan_r2 and _scan_r2 != "none":
   box-shadow:0 2px 16px rgba(0,0,0,0.75);backdrop-filter:blur(3px);
   pointer-events:none;
 ">
+<span class="mkw-x" data-close="scan" title="Close" style="position:absolute;top:3px;right:6px;pointer-events:auto;cursor:pointer;color:#cbd5e1;font-size:13px;line-height:1;font-family:sans-serif;padding:2px 4px;">✕</span>
 <div style="color:#fbcfe8;font-size:10px;font-weight:700;letter-spacing:0.5px;margin-bottom:6px;">
 🌸 Tonight — best spots ({_region_lbl_tn}) / moon {_moon_tn:.0f}%
 </div>
@@ -3782,6 +3848,7 @@ if _scan_r2 and _scan_r2 != "none":
   box-shadow:0 2px 16px rgba(0,0,0,0.75);backdrop-filter:blur(3px);
   pointer-events:none;
 ">
+<span class="mkw-x" data-close="scan" title="Close" style="position:absolute;top:3px;right:6px;pointer-events:auto;cursor:pointer;color:#cbd5e1;font-size:13px;line-height:1;font-family:sans-serif;padding:2px 4px;">✕</span>
 <div style="color:#fb923c;font-size:10px;font-weight:700;letter-spacing:0.5px;margin-bottom:6px;">
 🏆 {_date_header}
 </div>
@@ -3811,11 +3878,12 @@ if _scan_r2 and _scan_r2 != "none":
   display:inline-flex;align-items:center;
   white-space:nowrap;width:fit-content;
   background:{_ban_bg};border:1.5px solid {_ban_bdr};
-  border-radius:10px;padding:6px 13px;
+  border-radius:10px;padding:6px 28px 6px 13px;
   font-family:sans-serif;color:{_ban_clr};font-size:13px;font-weight:700;
   box-shadow:0 2px 16px rgba(0,0,0,0.75);backdrop-filter:blur(3px);
   pointer-events:none;
 ">
+<span class="mkw-x" data-close="scan" title="Close" style="position:absolute;top:3px;right:6px;pointer-events:auto;cursor:pointer;color:#cbd5e1;font-size:13px;line-height:1;font-family:sans-serif;padding:2px 4px;">✕</span>
 {_ban_txt}
 </div>
 </div>""", unsafe_allow_html=True)
@@ -3860,14 +3928,44 @@ elif _scan_r2 == "none":
   position:absolute;top:557px;left:2px;
   display:inline-flex;align-items:center;gap:5px;white-space:nowrap;width:fit-content;
   background:rgba(10,14,22,0.90);border:1.5px solid rgba(148,163,184,0.35);
-  border-radius:10px;padding:6px 13px;
+  border-radius:10px;padding:6px 28px 6px 13px;
   font-family:sans-serif;color:#94a3b8;font-size:12px;font-weight:600;
   box-shadow:0 2px 16px rgba(0,0,0,0.75);backdrop-filter:blur(3px);
   pointer-events:none;
 ">
+<span class="mkw-x" data-close="scan" title="Close" style="position:absolute;top:3px;right:6px;pointer-events:auto;cursor:pointer;color:#cbd5e1;font-size:13px;line-height:1;font-family:sans-serif;padding:2px 4px;">✕</span>
 <span style="font-size:15px;">{_fallback_icon_str}</span><span>{_fallback_lbl} in {_region_lbl_none} {_range_lbl}</span>
 </div>
 </div>""", unsafe_allow_html=True)
+
+# ── Nút ✕ của các cửa sổ kết quả trên map (Search location / AI picks) ───────────────
+# ✕ là phần tử HTML nằm trong cửa sổ (góc trên-phải); click được bắt bởi 1 listener nhỏ
+# gắn vào trang cha, rồi bấm hộ nút Streamlit ẩn tương ứng → Python xoá kết quả + vòng tròn.
+def _mkw_close_scan():
+    st.session_state._scan_result = None
+    st.session_state._scan_best = False
+    st.session_state._scan_tonight = False
+    st.session_state._scan_fallback_label = None
+    st.session_state._scan_scanning = False
+
+def _mkw_close_ai():
+    st.session_state._ai_rings = []
+    st.session_state._ai_panel = []
+
+st.markdown('<style>div[class*="st-key-mkw_close_"]{display:none !important;}</style>', unsafe_allow_html=True)
+if st.session_state._scan_result is not None:
+    st.button("x", key="mkw_close_scan", on_click=_mkw_close_scan)
+if st.session_state.get("_ai_panel"):
+    st.button("x", key="mkw_close_ai", on_click=_mkw_close_ai)
+import streamlit.components.v1 as _mkw_comp
+_mkw_comp.html("""<script>
+(function(){try{var P=window.parent;if(P.__mkwXInstalled)return;P.__mkwXInstalled=true;
+P.document.addEventListener('click',function(e){
+  var x=e.target&&e.target.closest?e.target.closest('.mkw-x'):null;if(!x)return;
+  var b=P.document.querySelector('.st-key-mkw_close_'+x.getAttribute('data-close')+' button');
+  if(b){e.preventDefault();e.stopPropagation();b.click();}
+},true);}catch(err){}})();
+</script>""", height=0)
 
 # ── LPM EXTERNAL LINK ─────────────────────────────────────────────────────────
 # URL is used inline in the nav row beside the location selectbox
