@@ -2707,13 +2707,13 @@ _COMBINED_CTRL_TEMPLATE = Template("""
         map.getContainer().appendChild(nf);
       }
       map.on('move', function() {
-        if (_curTileMode === 'lightpol') _lpmSync(map.getCenter(), map.getZoom(), false);
+        if (_curTileMode === 'lightpol' || _curTileMode === 'windy') _lpmSync(map.getCenter(), map.getZoom(), false);
       });
       map.on('zoomanim', function(e) {
-        if (_curTileMode === 'lightpol') _lpmSync(e.center, e.zoom, true);
+        if (_curTileMode === 'lightpol' || _curTileMode === 'windy') _lpmSync(e.center, e.zoom, true);
       });
       map.on('moveend', function() {
-        if (_curTileMode === 'lightpol') { clearTimeout(_lpmTimer); _lpmTimer = setTimeout(_lpmShowAt, 150); }
+        if (_curTileMode === 'lightpol' || _curTileMode === 'windy') { clearTimeout(_lpmTimer); _lpmTimer = setTimeout(_lpmShowAt, 150); }
       });
 
       function switchTile(mode) {
