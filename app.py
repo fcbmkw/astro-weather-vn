@@ -2179,6 +2179,7 @@ _COMBINED_CTRL_TEMPLATE = Template("""
   }
   function _lsSet(k, v) { try { localStorage.setItem(k, String(v)); } catch(e){} }
 
+  var _windyOverlay = _lsGet('astro_windy_overlay', 'rain');
   function _buildWindySrc(lat, lon, zoom) {
     var latStr = parseFloat(lat).toFixed(4);
     var lonStr = parseFloat(lon).toFixed(4);
@@ -2188,8 +2189,8 @@ _COMBINED_CTRL_TEMPLATE = Template("""
       + '&detailLat=' + latStr
       + '&detailLon=' + lonStr
       + '&width=650&height=450&zoom=' + Math.round(zoom)
-      + '&level=surface&overlay=rain&product=ecmwf'
-      + '&menu=&message=true&marker=' + latStr + ',' + lonStr + '&calendar=now'
+      + '&level=surface&overlay=' + encodeURIComponent(_windyOverlay) + '&product=ecmwf'
+      + '&menu=&message=&marker=&calendar=now'
       + '&pressure=&type=map&location=coordinates'
       + '&detail=&metricWind=default&metricTemp=default&radarRange=-1';
   }
@@ -2680,15 +2681,16 @@ _COMBINED_CTRL_TEMPLATE = Template("""
       }
       function _lpmShowAt() {
         var c = map.getCenter();
-        var z = Math.max(2, Math.min(18, Math.round(map.getZoom())));
-        var src = _buildLpmSrc(c.lat, c.lng, z);
+        var isW = (_curTileMode === 'windy');
+        var z = Math.max(isW ? 3 : 2, Math.min(isW ? 11 : 18, Math.round(map.getZoom())));
+        var src = isW ? _buildWindySrc(c.lat, c.lng, z) : _buildLpmSrc(c.lat, c.lng, z);
         var ref = _lpmPending || _lpmVisible;
         if (ref && ref.getAttribute('data-src') === src) return;
         if (_lpmPending && _lpmPending.parentNode) _lpmPending.parentNode.removeChild(_lpmPending);
         var nf = document.createElement('iframe');
         nf.setAttribute('data-src', src);
         nf._base = { center: c, zoom: z };
-        nf.title = 'Light Pollution Map';
+        nf.title = isW ? 'Windy' : 'Light Pollution Map';
         nf.setAttribute('sandbox', 'allow-scripts allow-same-origin allow-forms allow-popups');
         nf.style.cssText = ('position:absolute;top:-40%;left:-40%;width:180%;height:180%;border:none;'
           + 'will-change:transform;transform-origin:50% 50%;'
@@ -2718,23 +2720,21 @@ _COMBINED_CTRL_TEMPLATE = Template("""
         var mapEl = map.getContainer();
         var prevMode = _lsGet(LS_TILE, null);
         _curTileMode = mode;
-        _ensureWindyFrame(mapEl);
         // ── Disable/enable zoom buttons based on tile mode ─────────────────────
         var zoomIn  = mapEl.querySelector('.leaflet-control-zoom-in');
         var zoomOut = mapEl.querySelector('.leaflet-control-zoom-out');
-        var isWindy = (mode === 'windy');
+        var isWindy = false;   // +/- luôn bật: Leaflet điều khiển cả Windy lẫn LPM
         if (zoomIn)  { zoomIn.style.opacity  = isWindy ? '0.35' : '1'; zoomIn.style.pointerEvents  = isWindy ? 'none' : 'auto'; zoomIn.style.cursor  = isWindy ? 'not-allowed' : ''; }
         if (zoomOut) { zoomOut.style.opacity = isWindy ? '0.35' : '1'; zoomOut.style.pointerEvents = isWindy ? 'none' : 'auto'; zoomOut.style.cursor = isWindy ? 'not-allowed' : ''; }
         _himCleanup();
         _lpmClear();
         if (ormLayer) { map.removeLayer(ormLayer); ormLayer = null; }
         if (mode === 'windy') {
-          var c = map.getCenter();
-          var z = map.getZoom();
-          var needSync = (prevMode !== 'windy') || (_lsGet(LS_W_LAT, null) === null);
-          if (needSync) { window.flyWindy(c.lat, c.lng, z); }
+          // Windy: nền = embed.windy.com (không nhận chuột); marker của app nằm phía trên
           if (current) { map.removeLayer(current); current = null; }
-          _windyFrame.style.display = 'block';
+          map.setMaxZoom(11);
+          if (map.getZoom() > 11) map.setZoom(11);
+          _lpmShowAt();
         } else if (mode === 'himawari') {
           if (_windyFrame) _windyFrame.style.display = 'none';
           if (current) { map.removeLayer(current); }
@@ -2763,6 +2763,7 @@ _COMBINED_CTRL_TEMPLATE = Template("""
             ormLayer.addTo(map);
           }
         }
+        if (_wSel) _wSel.style.display = (mode === 'windy') ? 'inline-block' : 'none';
         _lsSet(LS_TILE, mode);
         Object.keys(btns).forEach(function(k){
           btns[k].style.background = (k === mode) ? '#3b82f6' : 'transparent';
@@ -2781,6 +2782,22 @@ _COMBINED_CTRL_TEMPLATE = Template("""
           + 'transition:background 0.2s,color 0.2s;background:transparent;color:#94a3b8;';
         btns[mode] = btn;
         L.DomEvent.on(btn, 'click', function(){ switchTile(mode); });
+      });
+
+      // ── Windy: chọn layer ngay trên app (vì nền Windy không nhận chuột nữa) ──────
+      var _wSel = L.DomUtil.create('select', '', tileRow);
+      _wSel.title = 'Windy layer';
+      _wSel.style.cssText = 'display:none;margin-left:4px;border:1px solid #475569;border-radius:5px;'
+        + 'background:#0f172a;color:#e2e8f0;font-size:12px;padding:2px 4px;';
+      [['rain','Rain'],['clouds','Clouds'],['wind','Wind'],['temp','Temp']].forEach(function(o) {
+        var op = document.createElement('option'); op.value = o[0]; op.textContent = o[1]; _wSel.appendChild(op);
+      });
+      _wSel.value = _windyOverlay;
+      L.DomEvent.disableClickPropagation(_wSel);
+      L.DomEvent.on(_wSel, 'change', function() {
+        _windyOverlay = _wSel.value;
+        _lsSet('astro_windy_overlay', _windyOverlay);
+        if (_curTileMode === 'windy') _lpmShowAt();
       });
 
       map.whenReady(function(){
