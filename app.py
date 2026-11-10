@@ -838,11 +838,11 @@ def _build_night_data(lat, lon, slots, hourly_data_frozen, weather_source, loc_u
             out_debug = {"low": int(low_c), "mid": int(mid_c), "high": int(high_c), "total": int(avg_cloud)}
 
         score = 100 - avg_cloud
-        if score >= 92:   stars = "⭐⭐⭐⭐"
-        elif score >= 75: stars = "⭐⭐⭐☆"
-        elif score >= 50: stars = "⭐⭐☆☆"
-        elif score >= 20: stars = "⭐☆☆☆"
-        else:             stars = "☆☆☆☆"
+        if score >= 92:   stars = "⭐⭐⭐⭐"; _stars_n = 4
+        elif score >= 75: stars = "⭐⭐⭐☆"; _stars_n = 3
+        elif score >= 50: stars = "⭐⭐☆☆"; _stars_n = 2
+        elif score >= 20: stars = "⭐☆☆☆"; _stars_n = 1
+        else:             stars = "☆☆☆☆"; _stars_n = 0
 
         out_table.append({
             "⏰": label,
@@ -850,11 +850,30 @@ def _build_night_data(lat, lon, slots, hourly_data_frozen, weather_source, loc_u
             "💧": f"{int(humid)}%",
             "💨": f"{round(wind_speed,1)}m/s",
             "📸": stars,
+            "_stars": _stars_n,
             "_temp": temp_val,
             "_precip": precip_val,
         })
 
     return out_table, out_hours, out_moon, out_sun, out_mw, out_debug, out_srcs
+
+def _half_star_html(v):
+    """4 ngôi sao; v bội của 0.5. Đầy = vàng; nửa sao = nửa TRÁI vàng, nửa PHẢI không màu (chỉ viền); rỗng = chỉ viền.
+    Hai lớp dùng cùng glyph ★ (viền bằng text-stroke) nên clip 50% khớp đúng giữa ngôi sao."""
+    S = "&#9733;"
+    gold  = "color:#facc15;-webkit-text-stroke:1.2px #facc15;"
+    empty = "color:transparent;-webkit-text-stroke:1.2px #cbd5e1;"
+    box   = "display:inline-block;margin-right:2px;"
+    parts = []
+    for k in range(4):
+        if v >= k + 1:
+            parts.append(f'<span style="{box}{gold}">{S}</span>')
+        elif v >= k + 0.5:
+            parts.append(f'<span style="{box}position:relative;{empty}">{S}'
+                         f'<span style="position:absolute;left:0;top:0;clip-path:inset(0 50% 0 0);{gold}">{S}</span></span>')
+        else:
+            parts.append(f'<span style="{box}{empty}">{S}</span>')
+    return "".join(parts)
 
 # Chuyển hourly_data sang dạng hashable để cache key hoạt động
 _hourly_frozen = tuple(
@@ -4324,27 +4343,57 @@ st.markdown("""
         [data-testid="stTable"] td:nth-child(5), [data-testid="stTable"] th:nth-child(5) { width: 35% !important; }
     </style>
 """, unsafe_allow_html=True)
+# ── TEMPERATURE hiện tại (Open-Meteo "current": cập nhật mỗi 15 phút, cả ngày lẫn đêm) ────────────────────
+@st.cache_data(ttl=600, show_spinner=False)
+def _current_temp(lat3: float, lon3: float):
+    """Nhiệt độ 2 m hiện tại tại toạ độ (lỗi → raise, cache_data không lưu lỗi)."""
+    r = requests.get("https://api.open-meteo.com/v1/forecast",
+                     params={"latitude": lat3, "longitude": lon3,
+                             "current": "temperature_2m,apparent_temperature", "timezone": "auto"},
+                     timeout=6)
+    r.raise_for_status()
+    c = r.json()["current"]
+    return {"t": float(c["temperature_2m"]), "feels": c.get("apparent_temperature"), "time": str(c.get("time", ""))}
+
+_sky_temp_fragment = st.fragment(run_every="10m") if hasattr(st, "fragment") else (lambda f: f)
+
+@_sky_temp_fragment
+def _sky_temp_card(lat3, lon3, left_html):
+    """Khung: [SKY QUALITY | TEMPERATURE]. Chạy lại mỗi 10 phút (không tải lại cả trang)."""
+    try:
+        d = _current_temp(lat3, lon3)
+        _tv = d["t"]
+        _col = "#93c5fd" if _tv < 5 else ("#fbbf24" if _tv < 25 else "#fb923c")
+        _feels = f"Feels {round(float(d['feels']))}° · " if d.get("feels") is not None else ""
+        _hhmm = d["time"][11:16] if len(d["time"]) >= 16 else ""
+        _big = f'{_tv:.1f}°C'
+        _small = f'{_feels}{_hhmm}'
+    except Exception:
+        _col, _big, _small = "#64748b", "--", "unavailable"
+    _bl = "border-left:1px solid #334155;padding-left:10px;" if left_html else ""
+    st.markdown(f"""
+        <div class="metric-card">
+            <div style="display:flex;gap:10px;">
+                {left_html}
+                <div style="flex:1;min-width:0;{_bl}">
+                    <span style="color:#94a3b8;font-size:13px;font-weight:bold;">🌡️ TEMPERATURE</span>
+                    <div style="font-size:28px;font-weight:bold;color:{_col};margin-top:5px;line-height:1.2;">{_big}</div>
+                    <div style="font-size:12px;color:#94a3b8;margin-top:3px;">{_small}</div>
+                </div>
+            </div>
+        </div>""", unsafe_allow_html=True)
+
 col_left, col_right = st.columns([2.5, 1.1])
 
 with col_right:
-    # Bortle — luôn hiện khung Bortle Scale (model được hiệu chỉnh cho Việt Nam)
-    st.markdown(f"""
-    <div class="metric-card">
-        <div style="display:flex;align-items:flex-start;justify-content:space-between;">
-            <span style="color:#94a3b8;font-size:13px;font-weight:bold;">🌌 SKY QUALITY</span>
-            <a href="{_lpm_url}" target="_blank" rel="noopener" title="Light Pollution Map"
-               style="display:inline-flex;align-items:center;justify-content:center;
-                      background:rgba(124,58,237,0.18);border:1.5px solid rgba(124,58,237,0.55);
-                      border-radius:5px;padding:2px 7px;text-decoration:none;
-                      color:#a78bfa;font-size:10px;font-weight:700;
-                      white-space:nowrap;cursor:pointer;flex-shrink:0;
-                      transition:background 0.2s;"
-               onmouseover="this.style.background='rgba(124,58,237,0.38)'"
-               onmouseout="this.style.background='rgba(124,58,237,0.18)'">LPM</a>
-        </div>
-        <div style="font-size:28px;font-weight:bold;color:#38bdf8;margin-top:5px;">Bortle Class {bortle_class}</div>
-        <div style="font-size:14px;color:#e2e8f0;margin-top:2px;">SQM: <b>{sqm_val}</b> mag/arcsec²</div>
-    </div>""", unsafe_allow_html=True)
+    # SKY QUALITY (trái: Bortle, model được hiệu chỉnh cho Việt Nam) + TEMPERATURE (phải: nhiệt độ hiện tại, tự cập nhật 10 phút)
+    _sq_left = (
+        f'''<div style="flex:1;min-width:0;">
+                <span style="color:#94a3b8;font-size:13px;font-weight:bold;">🌌 SKY QUALITY</span>
+                <div style="font-size:20px;font-weight:bold;color:#38bdf8;margin-top:5px;line-height:1.2;">Bortle Class {bortle_class}</div>
+                <div style="font-size:12px;color:#e2e8f0;margin-top:3px;">SQM: <b>{sqm_val}</b> mag/arcsec²</div>
+            </div>''')
+    _sky_temp_card(round(float(st.session_state.lat), 3), round(float(st.session_state.lon), 3), _sq_left)
 
     # Moon Phase + Coordinate — 1 block, trái/phải
     st.markdown(f"""
@@ -4353,7 +4402,6 @@ with col_right:
             <div style="flex:1;">
                 <span style="color:#94a3b8;font-size:13px;font-weight:bold;">🌙 MOON PHASE</span>
                 <div style="font-size:28px;font-weight:bold;color:#fbbf24;margin-top:5px;">{moon_pct}%</div>
-                <div style="font-size:12px;color:#cbd5e1;margin-top:4px;font-style:italic;">{moon_text}</div>
             </div>
             <div style="flex:1;border-left:1px solid #334155;padding-left:10px;">
                 <span style="color:#94a3b8;font-size:13px;font-weight:bold;">📍 COORDINATE</span>
@@ -4482,11 +4530,8 @@ with col_right:
         _html = (
             '<div style="margin-top:8px;">'
             '<div style="font-size:12px;color:#94a3b8;font-weight:700;margin-bottom:6px;letter-spacing:0.5px;">'
-            '\U0001f31f TODAY HIGHLIGHT</div>'
+            '\U0001f31f HIGHLIGHT TONIGHT</div>'
             f'<div style="display:flex;flex-direction:column;gap:2px;width:100%;">{_th_rows}</div>'
-            '<div style="font-size:10px;color:#475569;margin-top:5px;text-align:right;">'
-            '<span style="color:#6ee7b7;">&#9679;</span> Perfect &nbsp;'
-            '<span style="color:#93c5fd;">&#9679;</span> Good &nbsp;(tonight)</div>'
             '</div>')
         return _html
 
@@ -4672,15 +4717,24 @@ with col_left:
             time_lbl = row['⏰']
             cloud_cell = _cloud_icon_cell(row['☁️'], row.get('_precip', 0.0), row.get('_temp'))
             humid_val  = row['💧']
+            try:
+                _tt = f"{int(round(float(row.get('_temp'))))}°"
+            except (TypeError, ValueError):
+                _tt = ""
+            humid_cell = (f'<span style="color:#fde68a;">{_tt}</span><span style="color:#9a6a45;">/</span>{humid_val}'
+                          if _tt else humid_val)
             wind_cell  = _wind_icon(row['💨'])
-            stars      = row['📸']
+            _own = row.get('_stars')
+            if _own is None:
+                _own = str(row['📸']).count('⭐')
+            stars      = _half_star_html(_own)
             rows_html += (
                 f'<tr style="background:{bg};border-bottom:1px solid rgba(234,88,12,0.18);">'
-                f'<td style="padding:8px 8px;font-weight:700;color:#fb923c;white-space:nowrap;">{time_lbl}</td>'
-                f'<td style="padding:8px 8px;overflow:hidden;">{cloud_cell}</td>'
-                f'<td style="padding:8px 8px;color:#fb923c;">{humid_val}</td>'
-                f'<td style="padding:8px 8px;color:#fb923c;">{wind_cell}</td>'
-                f'<td style="padding:8px 8px;font-size:16px;letter-spacing:1px;">{stars}</td>'
+                f'<td style="padding:8px 6px;font-weight:700;color:#fb923c;white-space:nowrap;">{time_lbl}</td>'
+                f'<td style="padding:8px 6px;overflow:hidden;">{cloud_cell}</td>'
+                f'<td style="padding:8px 6px;color:#fb923c;font-size:13px;white-space:nowrap;">{humid_cell}</td>'
+                f'<td style="padding:8px 6px;color:#fb923c;">{wind_cell}</td>'
+                f'<td style="padding:8px 4px;font-size:22px;line-height:1;letter-spacing:0;white-space:nowrap;">{stars}</td>'
                 f'</tr>'
             )
 
@@ -4689,11 +4743,11 @@ with col_left:
   <table style="width:100%;border-collapse:collapse;font-size:14px;font-family:'Segoe UI',sans-serif;table-layout:fixed;">
     <thead>
       <tr style="background:linear-gradient(90deg,rgba(154,52,18,0.90),rgba(120,40,10,0.75));border-bottom:2px solid rgba(234,88,12,0.55);">
-        <th style="padding:10px 8px;text-align:left;color:#fb923c;font-weight:700;width:14%;">⏰</th>
-        <th style="padding:10px 8px;text-align:left;color:#fb923c;font-weight:700;width:20%;">🌤️</th>
-        <th style="padding:10px 8px;text-align:left;color:#fb923c;font-weight:700;width:13%;">💧</th>
-        <th style="padding:10px 8px;text-align:left;color:#fb923c;font-weight:700;width:16%;">💨</th>
-        <th style="padding:10px 8px;text-align:left;color:#fb923c;font-weight:700;width:37%;">📸</th>
+        <th style="padding:10px 6px;text-align:left;color:#fb923c;font-weight:700;width:14%;">⏰</th>
+        <th style="padding:10px 6px;text-align:left;color:#fb923c;font-weight:700;width:18%;">🌤️</th>
+        <th title="Temperature / Humidity" style="padding:10px 6px;text-align:left;color:#fb923c;font-weight:700;width:21%;white-space:nowrap;">🌡️/💧</th>
+        <th style="padding:10px 6px;text-align:left;color:#fb923c;font-weight:700;width:16%;">💨</th>
+        <th style="padding:10px 4px;text-align:left;color:#fb923c;font-weight:700;width:31%;">📸</th>
       </tr>
     </thead>
     <tbody>{rows_html}</tbody>
@@ -4855,7 +4909,8 @@ def _csc_build_html(hourly, lat, lon, utc_off_s, target_dt, now_local):
     lab = "font-family:Consolas,'Courier New',monospace;font-size:11px;line-height:13px;color:#e2e8f0;white-space:nowrap;"
 
     def _cell(i, bg, tip, h_px=13):
-        return f'<div title="{tip}" style="height:{h_px}px;background:{bg};{_edge(i)}"></div>'
+        _m = ' data-m="1"' if (cols[i][2] == 0 and cols[i][0] > 0) else ''
+        return f'<div data-i="{i}"{_m} title="{tip}" style="height:{h_px}px;background:{bg};{_edge(i)}"></div>'
 
     def _na(i, name):
         return _cell(i, hatch, f"{_tt(i)} {name}: n/a")
@@ -4986,34 +5041,58 @@ def _csc_build_html(hourly, lat, lon, utc_off_s, target_dt, now_local):
     return "".join(p), _sel_idx, n
 
 st.markdown("---")
-st.markdown(f'### 🌌 Clear Sky Forecast "{_disp_name_html(st.session_state.location_name)}" (7 days)', unsafe_allow_html=True)
+st.markdown(f'### 🌌 Clear Sky Forecast 7 days for "{_disp_name_html(st.session_state.location_name)}"', unsafe_allow_html=True)
 _csc_now_local = datetime.now(timezone.utc).replace(tzinfo=None) + timedelta(seconds=_loc_utc_offset)
 _csc_res = _csc_build_html(hourly_data, st.session_state.lat, st.session_state.lon,
                            _loc_utc_offset, target_date, _csc_now_local)
 if _csc_res:
     import streamlit.components.v1 as _csc_components
     _csc_html, _csc_sel, _csc_n = _csc_res
+    _csc_d0 = datetime.strptime(hourly_data["time"][0][:10], "%Y-%m-%d")
+    _csc_start_ms = int(((_csc_d0 - datetime(1970, 1, 1)).total_seconds() - _loc_utc_offset) * 1000)   # 00:00 địa phương của cột đầu, theo epoch UTC
+    _csc_js = (r'''(function(){var sc=document.getElementById("sc");if(!sc)return;
+var down=false,sx=0,sl=0;
+sc.addEventListener("mousedown",function(e){down=true;sx=e.pageX;sl=sc.scrollLeft;sc.style.cursor="grabbing";});
+window.addEventListener("mouseup",function(){down=false;sc.style.cursor="grab";});
+window.addEventListener("mousemove",function(e){if(!down)return;e.preventDefault();sc.scrollLeft=sl-(e.pageX-sx);});
+var SEL=__SEL__,N=__N__,START=__START__,LAB=105,cur=-1;
+function nowIdx(){var i=Math.floor((Date.now()-START)/3600000);return Math.max(0,Math.min(N-1,i));}
+function cellX(i){var c=sc.querySelector('[data-i="'+i+'"]');return c?c.getBoundingClientRect().left-sc.getBoundingClientRect().left+sc.scrollLeft:0;}
+function colW(){var a=sc.querySelector('[data-i="0"]');return a?a.getBoundingClientRect().width:10;}
+function base(c){c.style.boxShadow=c.getAttribute('data-m')?'inset 2px 0 0 0 #ef4444':'';}
+function mark(i){
+  if(cur>=0){sc.querySelectorAll('[data-i="'+cur+'"]').forEach(base);}
+  sc.querySelectorAll('[data-i="'+i+'"]').forEach(function(c){c.style.boxShadow='inset 4px 0 0 0 #facc15';});
+  cur=i;
+}
+// Mỗi giờ: vạch vàng "now" dịch sang cột mới; nếu khung đang căn theo "now" thì cuộn để "now" luôn là cột đầu tiên
+function tick(first){
+  var i=nowIdx(); if(!first&&i===cur)return;
+  var aligned=first||Math.abs(sc.scrollLeft-Math.max(0,cellX(cur)-LAB))<=colW()*1.5;
+  mark(i);
+  if(aligned){sc.scrollTo({left:Math.max(0,cellX(i)-LAB),behavior:first?"auto":"smooth"});}
+}
+sc.querySelectorAll('[data-i]').forEach(base);          // bỏ vạch "now" do Python vẽ sẵn
+if(SEL>=60){mark(nowIdx());sc.scrollLeft=Math.max(0,SEL/N*sc.scrollWidth-sc.clientWidth*0.25);}   // đêm chọn ở xa: giữ như cũ
+else{tick(true);}
+setInterval(function(){tick(false);},30000);
+document.addEventListener("visibilitychange",function(){if(!document.hidden)tick(false);});
+})();'''
+               .replace("__SEL__", str(int(_csc_sel))).replace("__N__", str(int(_csc_n)))
+               .replace("__START__", str(_csc_start_ms)))
     _csc_doc = (
         '<!DOCTYPE html><html><head><meta charset="utf-8"><style>'
         'html,body{margin:0;padding:0;background:transparent;}'
         '#sc{scrollbar-width:thin;scrollbar-color:#475569 #0f172a;}'
         '#sc::-webkit-scrollbar{height:8px;}#sc::-webkit-scrollbar-thumb{background:#475569;border-radius:4px;}'
-        '</style></head><body>' + _csc_html +
-        '<script>(function(){var sc=document.getElementById("sc");if(!sc)return;'
-        'var down=false,sx=0,sl=0;'
-        'sc.addEventListener("mousedown",function(e){down=true;sx=e.pageX;sl=sc.scrollLeft;sc.style.cursor="grabbing";});'
-        'window.addEventListener("mouseup",function(){down=false;sc.style.cursor="grab";});'
-        'window.addEventListener("mousemove",function(e){if(!down)return;e.preventDefault();sc.scrollLeft=sl-(e.pageX-sx);});'
-        'var SEL=' + str(int(_csc_sel)) + ',N=' + str(int(_csc_n)) + ';'
-        'if(SEL>=60){sc.scrollLeft=Math.max(0,SEL/N*sc.scrollWidth-sc.clientWidth*0.25);}'
-        '})();</script></body></html>')
+        '</style></head><body>' + _csc_html + '<script>' + _csc_js + '</script></body></html>')
     _csc_components.html(_csc_doc, height=255)
 else:
     st.caption("Clear Sky Forecast: weather data unavailable.")
 
 # ── MOON + SUN + MILKY WAY ALTITUDE CHART ────────────────────────────────────
 st.markdown("---")
-st.markdown("### 📊 Moon, Sun & Milkyway Altitude (°)")
+st.markdown("### 📊 Milkyway Altitude")
 
 import plotly.graph_objects as go
 
@@ -5045,7 +5124,7 @@ fig.add_trace(go.Scatter(
     x=_x_positions, y=moon_altitudes,
     mode='lines',
     name='🌙 Moon',
-    line=dict(color='#fbbf24', width=4),
+    line=dict(color='#fbbf24', width=4, shape='spline', smoothing=1.0),
     fill='tozeroy',
     fillcolor='rgba(251,191,36,0.20)',
     hovertemplate='%{customdata}<br>Moon: %{y:.1f}°<extra></extra>',
@@ -5057,7 +5136,7 @@ fig.add_trace(go.Scatter(
     x=_x_positions, y=sun_altitudes,
     mode='lines',
     name='☀️ Sun',
-    line=dict(color='#38bdf8', width=4, dash='dash'),
+    line=dict(color='#38bdf8', width=4, dash='dash', shape='spline', smoothing=1.0),
     hovertemplate='%{customdata}<br>Sun: %{y:.1f}°<extra></extra>',
     customdata=hours_labels,
 ))
@@ -5067,7 +5146,7 @@ fig.add_trace(go.Scatter(
     x=_x_positions, y=milkyway_altitudes,
     mode='lines',
     name='🌌 Milkyway',
-    line=dict(color='#a78bfa', width=3.5, dash='dash'),
+    line=dict(color='#a78bfa', width=3.5, dash='dash', shape='spline', smoothing=1.0),
     hovertemplate='%{customdata}<br>Milkyway: %{y:.1f}°<extra></extra>',
     customdata=hours_labels,
 ))
