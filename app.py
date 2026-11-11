@@ -1654,6 +1654,31 @@ def _ai_panel_row(c):
             "detail": c.get("detail") or "", "moon": c.get("moon_illumination_pct"),
             "wk": bool(c.get("is_weekend")), "bortle": bortle}
 
+def _ai_mentioned_cands(answer_text, all_cands, max_n=5):
+    """Các địa điểm AI THỰC SỰ nêu tên trong câu trả lời, lấy từ kết quả của MỌI lần gọi tool trong lượt này
+    (không chỉ lần gọi cuối), theo thứ tự xuất hiện trong văn bản. Dùng để vẽ vòng tròn/bảng AI picks/ghim map khớp với lời AI."""
+    txt = re.sub(r"\s+", " ", str(answer_text or "")).lower()
+    found = {}
+    for c in all_cands:
+        if "lat" not in c:
+            continue
+        short = _disp_name(c.get("matched_name") or c.get("location_name") or "").partition(",")[0].strip()
+        latin = re.sub(r"[^A-Za-z0-9 .'’-]", "", short).strip()
+        pos = []
+        for k in {short.lower(), latin.lower()}:
+            if len(k) < 4:
+                continue
+            m = re.search(r"(?<![a-z0-9])" + re.escape(k) + r"(?![a-z0-9])", txt)
+            if m:
+                pos.append(m.start())
+        if not pos:
+            continue
+        found[(round(c["lat"], 3), round(c["lon"], 3))] = (min(pos), c)   # cùng địa điểm gọi nhiều lần → lấy kết quả mới nhất
+    cs = [c for _, c in sorted(found.values(), key=lambda x: x[0])]
+    if len(cs) > 1:
+        cs = [c for c in cs if c.get("is_good") is not False] or cs        # bỏ địa điểm ban đầu đã được báo là không tốt
+    return cs[:max_n]
+
 def ask_astro_ai(user_question: str):
     """Gửi câu hỏi tới Gemini KÈM LỊCH SỬ hội thoại (st.session_state.astro_ai_history)
     để AI nhớ ngữ cảnh câu trước (vd hỏi tiếp 'thế cuối tuần thì sao' sau khi đã hỏi
@@ -1697,6 +1722,7 @@ def ask_astro_ai(user_question: str):
     contents = history + [{"role": "user", "parts": [{"text": user_question}]}]
 
     last_result = {"data": None, "tool": None}
+    all_cands = []      # candidate của MỌI lần gọi tool trong lượt này (AI có thể gọi nhiều tool rồi trả lời theo lần gọi trước)
 
     def _wrap(fn):
         @functools.wraps(fn)
@@ -1705,6 +1731,8 @@ def ask_astro_ai(user_question: str):
             if isinstance(out, dict) and out.get("found"):
                 last_result["data"] = out
                 last_result["tool"] = fn.__name__
+                all_cands.extend(c for c in ([out] if "lat" in out else [out.get("best")] + list(out.get("alternatives", [])))
+                                 if isinstance(c, dict) and "lat" in c)
             return out
         return wrapped
 
@@ -1761,6 +1789,10 @@ def ask_astro_ai(user_question: str):
     if _rd:
         _cands = [_rd] if "lat" in _rd else [c for c in [_rd.get("best")] + list(_rd.get("alternatives", [])) if c]
         _shown = [c for c in _cands if "lat" in c]
+    # Ưu tiên đúng các địa điểm AI nêu tên trong câu trả lời (từ mọi lần gọi tool); không khớp được tên nào → như cũ
+    _named = _ai_mentioned_cands(answer_text, all_cands)
+    if _named:
+        _shown = _named
     st.session_state._ai_rings = [[c.get("matched_name") or c.get("location_name") or "", c["lat"], c["lon"]]
                                   for c in _shown]
     st.session_state._ai_panel = [_ai_panel_row(c) for c in _shown]
@@ -1779,6 +1811,10 @@ def ask_astro_ai(user_question: str):
         if loc and "lat" in loc:
             fly_to = {"lat": loc["lat"], "lon": loc["lon"],
                       "name": loc.get("matched_name") or loc.get("location_name")}
+
+    if _named:      # ghim map theo địa điểm đầu tiên AI nêu
+        _l = _named[0]
+        fly_to = {"lat": _l["lat"], "lon": _l["lon"], "name": _l.get("matched_name") or _l.get("location_name")}
 
     return answer_text, fly_to
 # ------------------------------------------------------------------------------ (hết KHỐI B)
