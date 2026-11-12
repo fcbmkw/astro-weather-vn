@@ -182,7 +182,7 @@ st.markdown("""
 for k, v in [("lat", 21.0285), ("lon", 105.8542),
              ("map_center", [21.0285, 105.8542]), ("zoom", 6),
              ("day_offset", 0), ("location_name", "Hanoi, Vietnam"),
-             ("is_custom_point", True), ("weather_source", "🔀 Blend (ECMWF+GFS)"),
+             ("is_custom_point", True), ("weather_source", "EU (ECMWF)"),
              ("active_source_used", "ECMWF"),
              ("_last_tip", None), ("_last_lc", None),
              ("_source_auto", True), ("_ecmwf_available", True),
@@ -550,14 +550,12 @@ def calculate_accurate_bortle(lat, lon):
 
 # ── WEATHER FETCH ─────────────────────────────────────────────────────────────
 # Các endpoint fallback theo thứ tự ưu tiên:
-#   1. Primary: ECMWF + GFS — đầy đủ nhất
-#   2. Fallback: chỉ GFS — nhẹ hơn, luôn hoạt động
-#   3. Fallback B: chỉ GFS — luôn hoạt động, không phụ thuộc server đơn lẻ
+#   Nguồn dữ liệu: ECMWF IFS 0.25° (GFS đã bỏ vì dự báo không đáng tin).
+#   Chỉ 1 endpoint; mỗi endpoint thử lại nhiều lần (xem _fetch_weather_raw_impl).
 _FIELDS = "cloud_cover,cloud_cover_low,cloud_cover_mid,cloud_cover_high,relative_humidity_2m,wind_speed_10m,temperature_2m,precipitation"
 _ENDPOINTS = [
     # (label, url_suffix)
-    ("full",    f"&hourly={_FIELDS}&models=gfs_seamless,ecmwf_ifs025&wind_speed_unit=ms&timezone=auto"),
-    ("gfs_only",f"&hourly={_FIELDS}&models=gfs_seamless&wind_speed_unit=ms&timezone=auto"),
+    ("full",    f"&hourly={_FIELDS}&models=ecmwf_ifs025&wind_speed_unit=ms&timezone=auto"),
 ]
 
 @st.cache_resource
@@ -613,12 +611,16 @@ def _fetch_weather_raw_impl(lat, lon, fast=False):
         for attempt in range(1 if fast else 3):   # 3 lần thử mỗi endpoint (fast: chỉ 1 lần)
             try:
                 # Multi-model request (full) nặng hơn, cần timeout dài hơn
-                _timeout = 12 if ep_label != "gfs_only" else 8
+                _timeout = 12
                 if fast: _timeout = 8
                 res = requests.get(url, headers=headers, timeout=_timeout)
                 if res.status_code == 200:
                     j = res.json()
-                    return j.get("hourly", {}), j.get("utc_offset_seconds", 32400), ep_label, None
+                    hrly = j.get("hourly", {})
+                    # request 1 model → key không có hậu tố model; thêm "_ecmwf_ifs025" cho thống nhất với phần còn lại
+                    hrly = {(k if (k == "time" or k.endswith("_ecmwf_ifs025")) else k + "_ecmwf_ifs025"): v
+                            for k, v in hrly.items()}
+                    return hrly, j.get("utc_offset_seconds", 32400), ep_label, None
                 # 5xx = server lỗi → thử endpoint tiếp theo ngay
                 last_error = f"HTTP {res.status_code}"
                 if res.status_code >= 500:
@@ -642,18 +644,13 @@ def fetch_weather_7days(lat, lon, source="ECMWF"):
 
 def get_val(hourly, field, idx, prefer_ecmwf=True):
     """
-    Extract a single numeric value for a field at index idx.
-    If prefer_ecmwf: try _ecmwf_ifs025 first, fallback to _gfs_seamless.
-    Else: try _gfs_seamless first, fallback to _ecmwf_ifs025.
+    Extract a single numeric value for a field at index idx (ECMWF IFS025 — nguồn duy nhất; GFS đã bỏ).
     Also tries bare key as last resort.
-    Returns (float_value, source_used: 'ECMWF'|'GFS'|None)
+    Returns (float_value, source_used: 'ECMWF'|'?'|None)
     """
-    order = ["_ecmwf_ifs025", "_gfs_seamless"] if prefer_ecmwf else ["_gfs_seamless", "_ecmwf_ifs025"]
-    labels = ["ECMWF", "GFS"] if prefer_ecmwf else ["GFS", "ECMWF"]
-    for suffix, label in zip(order, labels):
-        lst = hourly.get(f"{field}{suffix}", [])
-        if idx < len(lst) and lst[idx] is not None:
-            return float(lst[idx]), label
+    lst = hourly.get(f"{field}_ecmwf_ifs025", [])
+    if idx < len(lst) and lst[idx] is not None:
+        return float(lst[idx]), "ECMWF"
     # bare key fallback
     lst = hourly.get(field, [])
     if idx < len(lst) and lst[idx] is not None:
@@ -668,29 +665,12 @@ def _get_raw(hourly, field, suffix, idx):
     return None
 
 def get_val_blended(hourly, field, idx, day_offset):
-    """
-    Weighted blend of ECMWF + GFS based on day_offset.
-    Day 0-3: ECMWF x0.75 + GFS x0.25 (ECMWF IFS025, best short-range accuracy)
-    Day 4-7: ECMWF x0.60 + GFS x0.40 (GFS gains weight further out)
-    Re-normalises weights if any model has missing data.
-    Returns (float_value, label_string)
-    """
-    ecmwf = _get_raw(hourly, field, "_ecmwf_ifs025",  idx)
-    gfs   = _get_raw(hourly, field, "_gfs_seamless",  idx)
-
-    if day_offset <= 3:
-        weights = {"ecmwf": 0.75, "gfs": 0.25}
-    else:
-        weights = {"ecmwf": 0.60, "gfs": 0.40}
-
-    vals  = {"ecmwf": ecmwf, "gfs": gfs}
-    avail = {k: v for k, v in vals.items() if v is not None}
-    if not avail:
+    """(Giữ tên hàm cũ cho các nơi gọi) Chỉ còn ECMWF IFS025 sau khi bỏ GFS → không còn trộn nhiều model.
+    Returns (float_value, label_string)"""
+    ecmwf = _get_raw(hourly, field, "_ecmwf_ifs025", idx)
+    if ecmwf is None:
         return 0.0, None
-
-    total_w = sum(weights[k] for k in avail)
-    blended = sum(weights[k] * v for k, v in avail.items()) / total_w
-    return round(blended, 1), "Blend"
+    return round(ecmwf, 1), "ECMWF"
 
 # ── COMPUTED STATE ────────────────────────────────────────────────────────────
 bortle_class, sqm_val = calculate_accurate_bortle(st.session_state.lat, st.session_state.lon)
@@ -727,8 +707,12 @@ next_date   = target_date + timedelta(days=1)
 
 moon_pct, moon_text = get_moon_phase_percent(target_date)
 
-prefer_ecmwf = (st.session_state.weather_source != "US (GFS)")
-use_blend  = (st.session_state.weather_source == "🔀 Blend (ECMWF+GFS)")
+# Lựa chọn nguồn cũ đã lưu (US (GFS) / Blend ECMWF+GFS) → chuyển sang ECMWF (nguồn duy nhất)
+if st.session_state.weather_source != "EU (ECMWF)":
+    st.session_state.weather_source = "EU (ECMWF)"
+
+prefer_ecmwf = True
+use_blend  = False
 use_ecmwf  = (st.session_state.weather_source == "EU (ECMWF)")
 hourly_data, _, _loc_utc_offset, _ep_label, _last_error = fetch_weather_7days(
     st.session_state.lat, st.session_state.lon, st.session_state.weather_source
@@ -764,8 +748,8 @@ def _build_night_data(lat, lon, slots, hourly_data_frozen, weather_source, loc_u
     # hourly_data_frozen là tuple-of-items để hashable
     hourly = dict(hourly_data_frozen) if hourly_data_frozen else {}
 
-    _prefer_ecmwf = weather_source not in ["US (GFS)", "EU (ECMWF)"]
-    _use_blend  = weather_source == "🔀 Blend (ECMWF+GFS)"
+    _prefer_ecmwf = True
+    _use_blend  = False
     _use_ecmwf  = weather_source == "EU (ECMWF)"
 
     # day_offset chỉ ảnh hưởng blend weight — dùng slot index 0 làm proxy
@@ -939,12 +923,8 @@ else:
 sources_used = set(sources_used)  # trả về từ cache là frozenset hoặc set, đảm bảo là set
 
 # Label thực tế đã dùng — phân biệt auto-fallback với user chọn tay
-if use_blend:
-    active_source_label = "🔀 Blend (ECMWF+GFS)"
-elif "ECMWF" in sources_used:
+if "ECMWF" in sources_used:
     active_source_label = "EU (ECMWF IFS025)"
-elif "GFS" in sources_used:
-    active_source_label = "US (GFS)"
 else:
     active_source_label = st.session_state.weather_source
 
@@ -4478,21 +4458,6 @@ with col_right:
             </div>
         </div>""", unsafe_allow_html=True)
 
-    # Weather source selectbox + source label
-    # Dynamic key theo weather_source → widget re-render đúng khi auto-fallback sang GFS
-    source_options = ["US (GFS)", "EU (ECMWF)", "🔀 Blend (ECMWF+GFS)"]
-    cur_src = st.session_state.weather_source
-    if cur_src not in source_options:
-        cur_src = "🔀 Blend (ECMWF+GFS)"
-    src_key = f"sel_source_{cur_src.replace(' ', '_').replace('(', '').replace(')', '').replace('🔀','')}"
-    chosen = st.selectbox("src", source_options,
-                          index=source_options.index(cur_src),
-                          label_visibility="collapsed", key=src_key)
-    if chosen != st.session_state.weather_source:
-        st.session_state.weather_source = chosen
-        st.session_state._source_auto = False  # user chọn tay → không auto-switch nữa
-        st.rerun()
-
     # ── TODAY HIGHLIGHT — thay vị trí 7-DAY FORECAST cũ (cùng kích thước) ─────
     # Mỗi vùng: liệt kê các địa điểm có thời tiết đêm nay OK (PERFECT / GOOD STARRY NIGHT).
     # Không có địa điểm nào → ghi "None" (xám). Muốn thêm/bớt vùng chỉ cần sửa _TH_REGIONS.
@@ -4713,11 +4678,6 @@ with col_left:
     # Table — custom styled HTML card
     if weather_table_data:
         # Hiện badge nếu đang dùng fallback endpoint
-        if _ep_label == "gfs_only":
-            st.markdown('<div style="background:#422006;border:1px solid #f97316;border-radius:8px;'
-                        'padding:6px 14px;margin-bottom:8px;font-size:13px;color:#fed7aa;">'
-                        '⚠️ ECMWF server error — using <b>GFS only</b> instead</div>',
-                        unsafe_allow_html=True)
         def _cloud_icon_cell(pct_str, precip_val=0.0, temp_val=None):
             pct = int(pct_str.replace('%',''))
             if precip_val is not None and precip_val > 0.5:
@@ -4905,20 +4865,16 @@ def _csc_build_html(hourly, lat, lon, utc_off_s, target_dt, now_local):
     illum = {d: get_moon_phase_percent(d0 + timedelta(days=d))[0] for d in range(_CSC_DAYS)}
     cols = [(d, d0 + timedelta(days=d), h) for d in range(_CSC_DAYS) for h in range(24)]
     n = len(cols)
-    ALL = ("_ecmwf_ifs025", "_gfs_seamless")
+    ALL = ("_ecmwf_ifs025",)
 
     recs = []
     for d, day, h in cols:
         idx = idx_of.get(f"{day.strftime('%Y-%m-%d')}T{h:02d}:00")
-        r = {"cloud": None, "src": "", "gfs": None, "hum": None, "wind": None, "temp": None}
+        r = {"cloud": None, "src": "", "hum": None, "wind": None, "temp": None}
         if idx is not None:
-            c_ecm = _csc_get(hourly, "cloud_cover", idx, ("_ecmwf_ifs025",), bare=False)
-            c_gfs = _csc_get(hourly, "cloud_cover", idx, ("_gfs_seamless",), bare=True)
+            c_ecm = _csc_get(hourly, "cloud_cover", idx, ("_ecmwf_ifs025",), bare=True)
             if c_ecm is not None:
                 r["cloud"], r["src"] = c_ecm, "ECMWF"
-            elif c_gfs is not None:
-                r["cloud"], r["src"] = c_gfs, "GFS"
-            r["gfs"] = c_gfs
             r["hum"] = _csc_get(hourly, "relative_humidity_2m", idx, ALL)
             r["wind"] = _csc_get(hourly, "wind_speed_10m", idx, ALL)
             r["temp"] = _csc_get(hourly, "temperature_2m", idx, ALL)
@@ -4983,15 +4939,6 @@ def _csc_build_html(hourly, lat, lon, utc_off_s, target_dt, now_local):
             cells.append(_cell(i, _csc_hex(_csc_rgb(_CSC_CLOUD_STOPS, r["cloud"]), r["dim"]),
                                f'{_tt(i)} Cloud ({r["src"]}): {int(round(r["cloud"]))}%'))
     p.append(_row("Cloud Cover:", cells))
-
-    cells = []
-    for i, r in enumerate(recs):
-        if r["gfs"] is None:
-            cells.append(_na(i, "GFS"))
-        else:
-            cells.append(_cell(i, _csc_hex(_csc_rgb(_CSC_CLOUD_STOPS, r["gfs"]), r["dim"]),
-                               f'{_tt(i)} GFS cloud: {int(round(r["gfs"]))}%'))
-    p.append(_row("GFS Cloud:", cells))
 
     cells = []
     for i, r in enumerate(recs):
