@@ -596,7 +596,8 @@ def _wx_prefetch(coords, workers=8, budget=25):
 @st.cache_data(ttl=3600, show_spinner=False)
 def _fetch_weather_raw(lat, lon):
     pre = _wx_prefetch_store()["data"].pop((lat, lon), None)
-    if pre is not None:
+    # Bỏ dữ liệu prefetch cũ (chỉ có ECMWF) còn sót trong cache_resource từ phiên bản trước
+    if pre is not None and any(k.endswith("_icon_global") for k in pre[0]):
         return pre
     return _fetch_weather_raw_impl(lat, lon)
 
@@ -759,7 +760,7 @@ next_date   = target_date + timedelta(days=1)
 
 moon_pct, moon_text = get_moon_phase_percent(target_date)
 
-# Nguồn thời tiết: radio "wx_src_ui" (Blend / ECMWF / ICON) → đồng bộ vào weather_source.
+# Nguồn thời tiết: dropdown "wx_src_ui" (ở cột phải, dưới thẻ Sky Quality) (Blend / ECMWF / ICON) → đồng bộ vào weather_source.
 # (Giá trị cũ như "EU (ECMWF)" / GFS không còn hợp lệ → về Blend.)
 _wx_ui = st.session_state.get("wx_src_ui")
 if _wx_ui in WX_SOURCES:
@@ -4563,6 +4564,16 @@ with col_right:
             '</div>')
         return _html
 
+    # ── Dropdown nguồn thời tiết (giống bản JP): Blend / ECMWF / ICON ───────────────
+    _WX_DISP = {"Blend": "🔀 Blend (ECMWF+ICON)", "ECMWF": "EU (ECMWF)", "ICON": "DE (ICON)"}
+    st.selectbox("src", WX_SOURCES, index=WX_SOURCES.index(st.session_state.weather_source),
+                 format_func=lambda v: _WX_DISP.get(v, v),
+                 label_visibility="collapsed", key="wx_src_ui")
+    _odd = sorted(set(sources_used) - {st.session_state.weather_source})   # nhãn khác nguồn đã chọn = đang bị thay thế
+    if _odd:
+        st.caption("⚠ Một số giờ không có dữ liệu của nguồn đã chọn — đang dùng " + " / ".join(_odd)
+                   + " thay thế (" + _WX_DISP.get(st.session_state.weather_source, "") + ").")
+
     _th_ph = st.empty()   # giữ chỗ: hiện ngay (dữ liệu lần trước hoặc 'loading…'), tính xong ở cuối script
 
     def _th_render():
@@ -4624,10 +4635,6 @@ with col_left:
 @media (max-width: 380px) {
     .st-key-sel_date input { font-size: 10px !important; }
 }
-/* Radio chọn nguồn: gọn */
-.st-key-wx_src_ui { margin-top: 2px; }
-.st-key-wx_src_ui label p { font-size: 12px !important; }
-
 /* LPM button is now a floating map control (bottomright) */
 
 /* ── NAV BOX: khung ngoài chứa 2 hàng con ──────────────────────────────────
@@ -4716,10 +4723,6 @@ with col_left:
                 st.rerun()
 
             st.button("➡️", key="btn_next", on_click=_go_next)
-        # Chọn nguồn dự báo: Blend (ECMWF+ICON) / ECMWF / ICON
-        st.radio("Model", WX_SOURCES, index=WX_SOURCES.index(st.session_state.weather_source),
-                 horizontal=True, label_visibility="collapsed", key="wx_src_ui",
-                 help="Blend = ECMWF + ICON (trọng số theo giờ dự báo) · ECMWF · ICON")
 
 
 
@@ -4748,7 +4751,7 @@ with col_left:
             return (f'<div style="display:flex;align-items:center;gap:2px;white-space:nowrap;">'
                     f'<span style="font-size:15px;line-height:1;">{icon}</span>'
                     f'<span style="font-size:11px;color:{col};font-weight:600;">{pct_str}</span>'
-                    + (f'<span title="ECMWF vs ICON: {int(round(spread))}% difference" '
+                    + (f'<span title="Chênh lệch ECMWF – ICON: {int(round(spread))}%" '
                        f'style="font-size:11px;color:#f59e0b;cursor:help;">\u26a0</span>'
                        if (spread is not None and spread > _SPREAD_WARN_PCT) else '')
                     + '</div>')
