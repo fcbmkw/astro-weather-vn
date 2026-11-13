@@ -182,7 +182,7 @@ st.markdown("""
 for k, v in [("lat", 21.0285), ("lon", 105.8542),
              ("map_center", [21.0285, 105.8542]), ("zoom", 6),
              ("day_offset", 0), ("location_name", "Hanoi, Vietnam"),
-             ("is_custom_point", True), ("weather_source", "EU (ECMWF)"),
+             ("is_custom_point", True), ("weather_source", "Blend"),
              ("active_source_used", "ECMWF"),
              ("_last_tip", None), ("_last_lc", None),
              ("_source_auto", True), ("_ecmwf_available", True),
@@ -550,12 +550,13 @@ def calculate_accurate_bortle(lat, lon):
 
 # ── WEATHER FETCH ─────────────────────────────────────────────────────────────
 # Các endpoint fallback theo thứ tự ưu tiên:
-#   Nguồn dữ liệu: ECMWF IFS 0.25° (GFS đã bỏ vì dự báo không đáng tin).
+#   Nguồn dữ liệu: ECMWF IFS 0.25° + ICON global (GFS đã bỏ vì dự báo không đáng tin).
+#   1 lần gọi API lấy cả 2 mô hình; key trả về có hậu tố _ecmwf_ifs025 / _icon_global.
 #   Chỉ 1 endpoint; mỗi endpoint thử lại nhiều lần (xem _fetch_weather_raw_impl).
 _FIELDS = "cloud_cover,cloud_cover_low,cloud_cover_mid,cloud_cover_high,relative_humidity_2m,wind_speed_10m,temperature_2m,precipitation"
 _ENDPOINTS = [
     # (label, url_suffix)
-    ("full",    f"&hourly={_FIELDS}&models=ecmwf_ifs025&wind_speed_unit=ms&timezone=auto"),
+    ("full",    f"&hourly={_FIELDS}&models=ecmwf_ifs025,icon_global&wind_speed_unit=ms&timezone=auto"),
 ]
 
 @st.cache_resource
@@ -617,8 +618,9 @@ def _fetch_weather_raw_impl(lat, lon, fast=False):
                 if res.status_code == 200:
                     j = res.json()
                     hrly = j.get("hourly", {})
-                    # request 1 model → key không có hậu tố model; thêm "_ecmwf_ifs025" cho thống nhất với phần còn lại
-                    hrly = {(k if (k == "time" or k.endswith("_ecmwf_ifs025")) else k + "_ecmwf_ifs025"): v
+                    # nhiều model → key đã có hậu tố; nếu API trả key trần (chỉ 1 model) thì gán cho ECMWF
+                    hrly = {(k if (k == "time" or k.endswith("_ecmwf_ifs025") or k.endswith("_icon_global"))
+                             else k + "_ecmwf_ifs025"): v
                             for k, v in hrly.items()}
                     return hrly, j.get("utc_offset_seconds", 32400), ep_label, None
                 # 5xx = server lỗi → thử endpoint tiếp theo ngay
@@ -664,13 +666,63 @@ def _get_raw(hourly, field, suffix, idx):
         return float(lst[idx])
     return None
 
-def get_val_blended(hourly, field, idx, day_offset):
-    """(Giữ tên hàm cũ cho các nơi gọi) Chỉ còn ECMWF IFS025 sau khi bỏ GFS → không còn trộn nhiều model.
-    Returns (float_value, label_string)"""
-    ecmwf = _get_raw(hourly, field, "_ecmwf_ifs025", idx)
-    if ecmwf is None:
+# ── BLEND ECMWF + ICON theo SỐ GIỜ DỰ BÁO CÒN LẠI (lead time) ─────────────────────
+#   Việt Nam không có mô hình vùng độ phân giải cao → blend 2 mô hình toàn cầu.
+#   lead ≤ 72h  : ECMWF 0.60 / ICON 0.40
+#   72h → 120h  : ICON giảm dần tuyến tính 0.40 → 0.25
+#   ≥ 120h      : ECMWF 0.75 / ICON 0.25
+#   Thiếu 1 model → dùng model còn lại (tự chuẩn hóa).  Hằng số để chỉnh sau khi kiểm chứng.
+_SFX_ECMWF = "_ecmwf_ifs025"
+_SFX_ICON  = "_icon_global"
+WX_SOURCES = ["Blend", "ECMWF", "ICON"]
+_BLEND_ICON_W0       = 0.40
+_BLEND_ICON_W_FAR    = 0.25
+_BLEND_RAMP_START_H  = 72.0
+_BLEND_RAMP_END_H    = 120.0
+_SPREAD_WARN_PCT     = 40.0   # |ECMWF − ICON| mây > 40% → cờ ⚠
+
+def _icon_weight(lead_h):
+    if lead_h is None or lead_h <= _BLEND_RAMP_START_H:
+        return _BLEND_ICON_W0
+    if lead_h >= _BLEND_RAMP_END_H:
+        return _BLEND_ICON_W_FAR
+    f = (lead_h - _BLEND_RAMP_START_H) / (_BLEND_RAMP_END_H - _BLEND_RAMP_START_H)
+    return _BLEND_ICON_W0 + (_BLEND_ICON_W_FAR - _BLEND_ICON_W0) * f
+
+def get_val_blended(hourly, field, idx, lead_h):
+    """Blend ECMWF + ICON theo lead time. Returns (float_value, label) — label 'Blend'/'ECMWF'/'ICON'/None."""
+    e = _get_raw(hourly, field, _SFX_ECMWF, idx)
+    i = _get_raw(hourly, field, _SFX_ICON, idx)
+    if e is None and i is None:
         return 0.0, None
-    return round(ecmwf, 1), "ECMWF"
+    if i is None:
+        return round(e, 1), "ECMWF"
+    if e is None:
+        return round(i, 1), "ICON"
+    wi = _icon_weight(lead_h)
+    return round((1.0 - wi) * e + wi * i, 1), "Blend"
+
+def _wx_pick(hourly, field, idx, source, lead_h):
+    """Giá trị theo lựa chọn nguồn: 'Blend' | 'ECMWF' | 'ICON' (model được chọn thiếu dữ liệu → dùng model kia)."""
+    if source == "ECMWF":
+        order = ((_SFX_ECMWF, "ECMWF"), (_SFX_ICON, "ICON"))
+    elif source == "ICON":
+        order = ((_SFX_ICON, "ICON"), (_SFX_ECMWF, "ECMWF"))
+    else:
+        return get_val_blended(hourly, field, idx, lead_h)
+    for sfx, lbl in order:
+        v = _get_raw(hourly, field, sfx, idx)
+        if v is not None:
+            return round(v, 1), lbl
+    return 0.0, None
+
+def _model_spread(hourly, idx):
+    """|ECMWF − ICON| của cloud_cover tại idx (None nếu thiếu 1 trong 2 model)."""
+    e = _get_raw(hourly, "cloud_cover", _SFX_ECMWF, idx)
+    i = _get_raw(hourly, "cloud_cover", _SFX_ICON, idx)
+    if e is None or i is None:
+        return None
+    return abs(e - i)
 
 # ── COMPUTED STATE ────────────────────────────────────────────────────────────
 bortle_class, sqm_val = calculate_accurate_bortle(st.session_state.lat, st.session_state.lon)
@@ -707,13 +759,13 @@ next_date   = target_date + timedelta(days=1)
 
 moon_pct, moon_text = get_moon_phase_percent(target_date)
 
-# Lựa chọn nguồn cũ đã lưu (US (GFS) / Blend ECMWF+GFS) → chuyển sang ECMWF (nguồn duy nhất)
-if st.session_state.weather_source != "EU (ECMWF)":
-    st.session_state.weather_source = "EU (ECMWF)"
-
-prefer_ecmwf = True
-use_blend  = False
-use_ecmwf  = (st.session_state.weather_source == "EU (ECMWF)")
+# Nguồn thời tiết: radio "wx_src_ui" (Blend / ECMWF / ICON) → đồng bộ vào weather_source.
+# (Giá trị cũ như "EU (ECMWF)" / GFS không còn hợp lệ → về Blend.)
+_wx_ui = st.session_state.get("wx_src_ui")
+if _wx_ui in WX_SOURCES:
+    st.session_state.weather_source = _wx_ui
+if st.session_state.weather_source not in WX_SOURCES:
+    st.session_state.weather_source = "Blend"
 hourly_data, _, _loc_utc_offset, _ep_label, _last_error = fetch_weather_7days(
     st.session_state.lat, st.session_state.lon, st.session_state.weather_source
 )
@@ -748,18 +800,8 @@ def _build_night_data(lat, lon, slots, hourly_data_frozen, weather_source, loc_u
     # hourly_data_frozen là tuple-of-items để hashable
     hourly = dict(hourly_data_frozen) if hourly_data_frozen else {}
 
-    _prefer_ecmwf = True
-    _use_blend  = False
-    _use_ecmwf  = weather_source == "EU (ECMWF)"
-
-    # day_offset chỉ ảnh hưởng blend weight — dùng slot index 0 làm proxy
-    _day_offset_proxy = 0
-    if slots:
-        yr0, mo0, dy0 = slots[0][0], slots[0][1], slots[0][2]
-        from datetime import date as _date
-        _today = _date.today()
-        _day_offset_proxy = (_date(yr0, mo0, dy0) - _today).days
-        _day_offset_proxy = max(0, min(6, _day_offset_proxy))
+    _src = weather_source if weather_source in WX_SOURCES else "Blend"
+    _now_utc = datetime.now(timezone.utc).replace(tzinfo=None)   # lead time tính theo UTC (không phụ thuộc giờ server)
 
     out_table  = []
     out_hours  = []
@@ -786,37 +828,23 @@ def _build_night_data(lat, lon, slots, hourly_data_frozen, weather_source, loc_u
         if idx == -1:
             continue
 
-        if _use_blend:
-            avg_cloud, src1 = get_val_blended(hourly, "cloud_cover",          idx, _day_offset_proxy)
-            low_c,     _    = get_val_blended(hourly, "cloud_cover_low",       idx, _day_offset_proxy)
-            mid_c,     _    = get_val_blended(hourly, "cloud_cover_mid",       idx, _day_offset_proxy)
-            high_c,    _    = get_val_blended(hourly, "cloud_cover_high",      idx, _day_offset_proxy)
-            humid,     _    = get_val_blended(hourly, "relative_humidity_2m",  idx, _day_offset_proxy)
-            wind_speed,_    = get_val_blended(hourly, "wind_speed_10m",        idx, _day_offset_proxy)
-            temp_val,  _    = get_val_blended(hourly, "temperature_2m",        idx, _day_offset_proxy)
-            precip_val,_    = get_val_blended(hourly, "precipitation",         idx, _day_offset_proxy)
-            if src1: out_srcs.add(src1)
-        elif _use_ecmwf:
-            avg_cloud  = _get_raw(hourly, "cloud_cover",          "_ecmwf_ifs025", idx) or 0.0
-            low_c      = _get_raw(hourly, "cloud_cover_low",       "_ecmwf_ifs025", idx) or 0.0
-            mid_c      = _get_raw(hourly, "cloud_cover_mid",       "_ecmwf_ifs025", idx) or 0.0
-            high_c     = _get_raw(hourly, "cloud_cover_high",      "_ecmwf_ifs025", idx) or 0.0
-            humid      = _get_raw(hourly, "relative_humidity_2m",  "_ecmwf_ifs025", idx) or 0.0
-            wind_speed = _get_raw(hourly, "wind_speed_10m",        "_ecmwf_ifs025", idx) or 0.0
-            temp_val   = _get_raw(hourly, "temperature_2m",        "_ecmwf_ifs025", idx) or 0.0
-            precip_val = _get_raw(hourly, "precipitation",         "_ecmwf_ifs025", idx) or 0.0
-            src1 = "ECMWF"
-            out_srcs.add("ECMWF")
-        else:
-            avg_cloud, src1 = get_val(hourly, "cloud_cover",          idx, _prefer_ecmwf)
-            low_c,     _    = get_val(hourly, "cloud_cover_low",      idx, _prefer_ecmwf)
-            mid_c,     _    = get_val(hourly, "cloud_cover_mid",      idx, _prefer_ecmwf)
-            high_c,    _    = get_val(hourly, "cloud_cover_high",     idx, _prefer_ecmwf)
-            humid,     _    = get_val(hourly, "relative_humidity_2m", idx, _prefer_ecmwf)
-            wind_speed,_    = get_val(hourly, "wind_speed_10m",       idx, _prefer_ecmwf)
-            temp_val,  _    = get_val(hourly, "temperature_2m",       idx, _prefer_ecmwf)
-            precip_val,_    = get_val(hourly, "precipitation",        idx, _prefer_ecmwf)
-            if src1: out_srcs.add(src1)
+        _lead_h = (datetime(yr, mo, dy, hr_local) - timedelta(hours=loc_utc_offset_h) - _now_utc).total_seconds() / 3600.0
+
+        def _P(_f):
+            _v, _s = _wx_pick(hourly, _f, idx, _src, _lead_h)
+            if _s:
+                out_srcs.add(_s)
+            return _v
+
+        avg_cloud  = _P("cloud_cover")
+        low_c      = _P("cloud_cover_low")
+        mid_c      = _P("cloud_cover_mid")
+        high_c     = _P("cloud_cover_high")
+        humid      = _P("relative_humidity_2m")
+        wind_speed = _P("wind_speed_10m")
+        temp_val   = _P("temperature_2m")
+        precip_val = _P("precipitation")
+        _spread    = _model_spread(hourly, idx)
 
         if len(out_table) == 0:
             out_debug = {"low": int(low_c), "mid": int(mid_c), "high": int(high_c), "total": int(avg_cloud)}
@@ -837,6 +865,7 @@ def _build_night_data(lat, lon, slots, hourly_data_frozen, weather_source, loc_u
             "_stars": _stars_n,
             "_temp": temp_val,
             "_precip": precip_val,
+            "_spread": _spread,
         })
 
     return out_table, out_hours, out_moon, out_sun, out_mw, out_debug, out_srcs
@@ -923,10 +952,8 @@ else:
 sources_used = set(sources_used)  # trả về từ cache là frozenset hoặc set, đảm bảo là set
 
 # Label thực tế đã dùng — phân biệt auto-fallback với user chọn tay
-if "ECMWF" in sources_used:
-    active_source_label = "EU (ECMWF IFS025)"
-else:
-    active_source_label = st.session_state.weather_source
+active_source_label = st.session_state.weather_source if not sources_used else \
+    (st.session_state.weather_source + " [" + "+".join(sorted(sources_used)) + "]")
 
 # ── NIGHT VERDICT (full night 18:00~06:00) ───────────────────────────────────
 def _build_night_verdict(table_data, sun_alts=None, moon_illum=None):
@@ -4582,6 +4609,25 @@ with col_left:
     font-size: 12px !important;
 }
 
+/* Streamlit mới dùng react-aria ComboBox (không còn <select>/baseweb) → chọn theo key "sel_date".
+   Ô nhập cần đủ rộng để hiện trọn "11/13 eve (Fri) → 11/14 morn (Sat)"; màn hình hẹp thì tự co lại. */
+.st-key-sel_date input {
+    min-width: 215px !important;
+}
+@media (max-width: 480px) {
+    /* iPhone: nút ⬅️➡️ nhỏ lại + gap hẹp để cả 3 phần nằm trên 1 hàng */
+    .st-key-nav1 [data-testid="stVerticalBlock"] { gap: 4px !important; }
+    .st-key-nav1 [data-testid="stButton"] button { width: 34px !important; }
+    .st-key-nav1 [data-testid="stElementContainer"]:has([data-testid="stButton"]) { flex: 0 0 34px !important; }
+    .st-key-sel_date input { min-width: calc(100vw - 196px) !important; font-size: 11px !important; }
+}
+@media (max-width: 380px) {
+    .st-key-sel_date input { font-size: 10px !important; }
+}
+/* Radio chọn nguồn: gọn */
+.st-key-wx_src_ui { margin-top: 2px; }
+.st-key-wx_src_ui label p { font-size: 12px !important; }
+
 /* LPM button is now a floating map control (bottomright) */
 
 /* ── NAV BOX: khung ngoài chứa 2 hàng con ──────────────────────────────────
@@ -4670,6 +4716,10 @@ with col_left:
                 st.rerun()
 
             st.button("➡️", key="btn_next", on_click=_go_next)
+        # Chọn nguồn dự báo: Blend (ECMWF+ICON) / ECMWF / ICON
+        st.radio("Model", WX_SOURCES, index=WX_SOURCES.index(st.session_state.weather_source),
+                 horizontal=True, label_visibility="collapsed", key="wx_src_ui",
+                 help="Blend = ECMWF + ICON (trọng số theo giờ dự báo) · ECMWF · ICON")
 
 
 
@@ -4678,7 +4728,7 @@ with col_left:
     # Table — custom styled HTML card
     if weather_table_data:
         # Hiện badge nếu đang dùng fallback endpoint
-        def _cloud_icon_cell(pct_str, precip_val=0.0, temp_val=None):
+        def _cloud_icon_cell(pct_str, precip_val=0.0, temp_val=None, spread=None):
             pct = int(pct_str.replace('%',''))
             if precip_val is not None and precip_val > 0.5:
                 if temp_val is not None and temp_val < 1.0:
@@ -4698,7 +4748,10 @@ with col_left:
             return (f'<div style="display:flex;align-items:center;gap:2px;white-space:nowrap;">'
                     f'<span style="font-size:15px;line-height:1;">{icon}</span>'
                     f'<span style="font-size:11px;color:{col};font-weight:600;">{pct_str}</span>'
-                    f'</div>')
+                    + (f'<span title="ECMWF vs ICON: {int(round(spread))}% difference" '
+                       f'style="font-size:11px;color:#f59e0b;cursor:help;">\u26a0</span>'
+                       if (spread is not None and spread > _SPREAD_WARN_PCT) else '')
+                    + '</div>')
 
         def _wind_icon(ws_str):
             ws = float(ws_str.replace('m/s',''))
@@ -4711,7 +4764,7 @@ with col_left:
         for i, row in enumerate(weather_table_data):
             bg = 'rgba(234,88,12,0.10)' if i % 2 == 0 else 'rgba(194,65,12,0.06)'
             time_lbl = row['⏰']
-            cloud_cell = _cloud_icon_cell(row['☁️'], row.get('_precip', 0.0), row.get('_temp'))
+            cloud_cell = _cloud_icon_cell(row['☁️'], row.get('_precip', 0.0), row.get('_temp'), row.get('_spread'))
             humid_val  = row['💧']
             try:
                 _tt = f"{int(round(float(row.get('_temp'))))}°"
@@ -4865,19 +4918,21 @@ def _csc_build_html(hourly, lat, lon, utc_off_s, target_dt, now_local):
     illum = {d: get_moon_phase_percent(d0 + timedelta(days=d))[0] for d in range(_CSC_DAYS)}
     cols = [(d, d0 + timedelta(days=d), h) for d in range(_CSC_DAYS) for h in range(24)]
     n = len(cols)
-    ALL = ("_ecmwf_ifs025",)
-
+    _csc_src = st.session_state.get("weather_source", "Blend")
     recs = []
     for d, day, h in cols:
         idx = idx_of.get(f"{day.strftime('%Y-%m-%d')}T{h:02d}:00")
         r = {"cloud": None, "src": "", "hum": None, "wind": None, "temp": None}
         if idx is not None:
-            c_ecm = _csc_get(hourly, "cloud_cover", idx, ("_ecmwf_ifs025",), bare=True)
-            if c_ecm is not None:
-                r["cloud"], r["src"] = c_ecm, "ECMWF"
-            r["hum"] = _csc_get(hourly, "relative_humidity_2m", idx, ALL)
-            r["wind"] = _csc_get(hourly, "wind_speed_10m", idx, ALL)
-            r["temp"] = _csc_get(hourly, "temperature_2m", idx, ALL)
+            _lead = (datetime(day.year, day.month, day.day, h) - now_local).total_seconds() / 3600.0
+            def _g(_f):
+                _v, _s = _wx_pick(hourly, _f, idx, _csc_src, _lead)
+                return (_v if _s else None), _s
+            r["cloud"], _cs = _g("cloud_cover")
+            r["src"] = _cs or ""
+            r["hum"]  = _g("relative_humidity_2m")[0]
+            r["wind"] = _g("wind_speed_10m")[0]
+            r["temp"] = _g("temperature_2m")[0]
         sa = sun_g.get((d, h), -90.0)
         ma = moon_g.get((d, h), -90.0)
         r["sun"], r["moon"] = sa, ma
