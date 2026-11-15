@@ -2864,13 +2864,16 @@ _COMBINED_CTRL_TEMPLATE = Template("""
       });
 
       map.whenReady(function(){
-        var saved = _lsGet(LS_TILE, 'himawari');
-        if (['himawari','windy','satellite','lightpol'].indexOf(saved) < 0) saved = 'himawari';
-        // Chỉ lần mở trang ĐẦU TIÊN mới bắt đầu bằng Himawari thay cho Satellite.
-        // Các lần rerun sau (click chọn địa điểm...) giữ nguyên tab user đang xem.
-        var _firstLoad = true;
+        // Tab mặc định xoay vòng theo NGÀY (giờ máy người dùng): Himawari → Windy → Satellite → ... ; LPM không bao giờ là mặc định.
+        var _d = new Date();
+        var _dayN = Math.floor(Date.UTC(_d.getFullYear(), _d.getMonth(), _d.getDate()) / 86400000);
+        var _dayDefault = ['himawari', 'windy', 'satellite'][_dayN % 3];
+        var saved = _lsGet(LS_TILE, _dayDefault);
+        if (['himawari','windy','satellite','lightpol'].indexOf(saved) < 0) saved = _dayDefault;
+        // Lần mở trang ĐẦU TIÊN → tab mặc định của hôm nay. Các lần rerun sau (click chọn địa điểm...) giữ nguyên tab user đang xem.
+        var _firstLoad = false;
         try { var _P = window.parent; _firstLoad = !_P.__mkwTileInit; _P.__mkwTileInit = true; } catch(e) {}
-        if (_firstLoad && saved === 'satellite') saved = 'himawari';
+        if (_firstLoad) saved = _dayDefault;
         switchTile(saved);
       });
 
@@ -4751,8 +4754,13 @@ with col_left:
             return (f'<div style="display:flex;align-items:center;gap:2px;white-space:nowrap;">'
                     f'<span style="font-size:15px;line-height:1;">{icon}</span>'
                     f'<span style="font-size:11px;color:{col};font-weight:600;">{pct_str}</span>'
-                    + (f'<span title="Chênh lệch ECMWF – ICON: {int(round(spread))}%" '
-                       f'style="font-size:11px;color:#f59e0b;cursor:help;">\u26a0</span>'
+                    + (f'<details style="display:inline-block;position:relative;">'
+                       f'<summary title="Chênh lệch ECMWF – ICON: {int(round(spread))}%" '
+                       f'style="display:inline-block;list-style:none;cursor:pointer;font-size:13px;color:#f59e0b;padding:0 2px;">\u26a0</summary>'
+                       f'<div style="position:absolute;z-index:30;left:0;top:100%;margin-top:2px;background:#0f172a;'
+                       f'border:1px solid #f59e0b;border-radius:6px;padding:4px 8px;font-size:11px;color:#fde68a;'
+                       f'font-weight:600;white-space:nowrap;box-shadow:0 2px 8px rgba(0,0,0,0.6);">'
+                       f'Chênh lệch ECMWF – ICON: {int(round(spread))}%</div></details>'
                        if (spread is not None and spread > _SPREAD_WARN_PCT) else '')
                     + '</div>')
 
@@ -4783,7 +4791,7 @@ with col_left:
             rows_html += (
                 f'<tr style="background:{bg};border-bottom:1px solid rgba(234,88,12,0.18);">'
                 f'<td style="padding:8px 6px;font-weight:700;color:#fb923c;white-space:nowrap;">{time_lbl}</td>'
-                f'<td style="padding:8px 6px;overflow:hidden;">{cloud_cell}</td>'
+                f'<td style="padding:8px 6px;overflow:visible;">{cloud_cell}</td>'
                 f'<td style="padding:8px 6px;color:#fb923c;font-size:13px;white-space:nowrap;">{humid_cell}</td>'
                 f'<td style="padding:8px 6px;color:#fb923c;">{wind_cell}</td>'
                 f'<td style="padding:8px 4px;font-size:22px;line-height:1;letter-spacing:0;white-space:nowrap;">{stars}</td>'
