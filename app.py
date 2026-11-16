@@ -266,6 +266,15 @@ def get_moon_phase_percent(date_obj):
     else: desc = "Waning Crescent"
     return illum, desc
 
+def _moon_icon(desc):
+    """Tên pha trăng (đầu chuỗi mô tả) → emoji pha trăng."""
+    d = str(desc)
+    for key, ic in (("New Moon", "🌑"), ("Waxing Crescent", "🌒"), ("First Quarter", "🌓"), ("Waxing Gibbous", "🌔"),
+                    ("Full Moon", "🌕"), ("Waning Gibbous", "🌖"), ("Last Quarter", "🌗"), ("Waning Crescent", "🌘")):
+        if d.startswith(key):
+            return ic
+    return "🌙"
+
 @st.cache_data(ttl=86400, show_spinner=False)  # cache 24 giờ — quỹ đạo trăng không đổi trong ngày
 def calculate_exact_moon_altitude_ephem(lat, lon, year, month, day, hour_local, utc_offset_h=7.0):
     """Tính độ cao mặt trăng (có thể âm khi dưới đường chân trời).
@@ -4396,11 +4405,32 @@ def _current_temp(lat3: float, lon3: float):
     """Nhiệt độ 2 m hiện tại tại toạ độ (lỗi → raise, cache_data không lưu lỗi)."""
     r = requests.get("https://api.open-meteo.com/v1/forecast",
                      params={"latitude": lat3, "longitude": lon3,
-                             "current": "temperature_2m,apparent_temperature", "timezone": "auto"},
+                             "current": "temperature_2m,apparent_temperature,weather_code,is_day", "timezone": "auto"},
                      timeout=6)
     r.raise_for_status()
     c = r.json()["current"]
-    return {"t": float(c["temperature_2m"]), "feels": c.get("apparent_temperature"), "time": str(c.get("time", ""))}
+    return {"t": float(c["temperature_2m"]), "feels": c.get("apparent_temperature"), "time": str(c.get("time", "")),
+            "code": c.get("weather_code"), "day": c.get("is_day", 1)}
+
+def _wx_icon(code, is_day=1):
+    """Mã thời tiết WMO (Open-Meteo weather_code) → emoji (ngày/đêm)."""
+    try:
+        c = int(code)
+    except (TypeError, ValueError):
+        return ""
+    day = bool(is_day)
+    if c == 0:                      return "☀️" if day else "🌙"
+    if c == 1:                      return "🌤️" if day else "🌙"
+    if c == 2:                      return "⛅" if day else "☁️"
+    if c == 3:                      return "☁️"
+    if c in (45, 48):               return "🌫️"
+    if c in (51, 53, 55, 56, 57):   return "🌦️" if day else "🌧️"
+    if c in (61, 63, 65, 66, 67):   return "🌧️"
+    if c in (71, 73, 75, 77):       return "❄️"
+    if c in (80, 81, 82):           return "🌦️" if day else "🌧️"
+    if c in (85, 86):               return "🌨️"
+    if c in (95, 96, 99):           return "⛈️"
+    return "🌡️"
 
 _sky_temp_fragment = st.fragment(run_every="10m") if hasattr(st, "fragment") else (lambda f: f)
 
@@ -4410,13 +4440,14 @@ def _sky_temp_card(lat3, lon3, left_html):
     try:
         d = _current_temp(lat3, lon3)
         _tv = d["t"]
+        _icon = _wx_icon(d.get("code"), d.get("day", 1)) if d.get("code") is not None else ""
         _col = "#93c5fd" if _tv < 5 else ("#fbbf24" if _tv < 25 else "#fb923c")
         _feels = f"Feels {round(float(d['feels']))}° · " if d.get("feels") is not None else ""
         _hhmm = d["time"][11:16] if len(d["time"]) >= 16 else ""
         _big = f'{_tv:.1f}°C'
         _small = f'{_feels}{_hhmm}'
     except Exception:
-        _col, _big, _small = "#64748b", "--", "unavailable"
+        _col, _big, _small, _icon = "#64748b", "--", "unavailable", ""
     _bl = "border-left:1px solid #334155;padding-left:10px;" if left_html else ""
     st.markdown(f"""
         <div class="metric-card">
@@ -4424,7 +4455,10 @@ def _sky_temp_card(lat3, lon3, left_html):
                 {left_html}
                 <div style="flex:1;min-width:0;{_bl}">
                     <span style="color:#94a3b8;font-size:13px;font-weight:bold;">🌡️ TEMPERATURE</span>
-                    <div style="font-size:28px;font-weight:bold;color:{_col};margin-top:5px;line-height:1.2;">{_big}</div>
+                    <div style="display:flex;align-items:center;gap:6px;margin-top:5px;line-height:1.2;">
+                        <span style="font-size:28px;">{_icon}</span>
+                        <span style="font-size:28px;font-weight:bold;color:{_col};">{_big}</span>
+                    </div>
                     <div style="font-size:12px;color:#94a3b8;margin-top:3px;">{_small}</div>
                 </div>
             </div>
@@ -4448,7 +4482,10 @@ with col_right:
         <div style="display:flex;gap:10px;">
             <div style="flex:1;">
                 <span style="color:#94a3b8;font-size:13px;font-weight:bold;">🌙 MOON PHASE</span>
-                <div style="font-size:28px;font-weight:bold;color:#fbbf24;margin-top:5px;">{moon_pct}%</div>
+                <div style="display:flex;align-items:center;gap:8px;margin-top:5px;">
+                    <span style="font-size:42px;line-height:1;">{_moon_icon(moon_text)}</span>
+                    <span style="font-size:28px;font-weight:bold;color:#fbbf24;">{moon_pct}%</span>
+                </div>
             </div>
             <div style="flex:1;border-left:1px solid #334155;padding-left:10px;">
                 <span style="color:#94a3b8;font-size:13px;font-weight:bold;">📍 COORDINATE</span>
