@@ -266,6 +266,31 @@ def get_moon_phase_percent(date_obj):
     else: desc = "Waning Crescent"
     return illum, desc
 
+def _moon_img_b64(date_obj, size=42):
+    """Ảnh SVG (base64) của pha trăng: phần sáng tính đúng theo % hiển thị (cùng công thức với get_moon_phase_percent);
+    sáng bên phải khi trăng đang tròn dần (bán cầu bắc), bên trái khi khuyết dần. Không viền; phần tối chỉ là đĩa rất mờ."""
+    import base64 as _b64
+    base = datetime(2024, 1, 11)
+    phase = ((date_obj - base).total_seconds() / 86400.0 / 29.53059) % 1.0
+    k = (1 - math.cos(phase * 2 * math.pi)) / 2           # 0..1 phần được chiếu sáng
+    rx = 48.0 * abs(1 - 2 * k)                              # bán trục ngắn của đường phân chia sáng/tối
+    sweep = 0 if k < 0.5 else 1                             # lưỡi liềm: cong vào trong; gần tròn: cong ra ngoài
+    tf = '' if phase < 0.5 else ' transform="translate(100,0) scale(-1,1)"'   # khuyết dần → phần sáng ở bên trái
+    lit = (f'<clipPath id="c"><path{tf} d="M50 2 A48 48 0 0 1 50 98 A{rx:.2f} 48 0 0 {sweep} 50 2 Z"/></clipPath>'
+           if k > 0.003 else '')
+    maria = ('<ellipse cx="38" cy="31" rx="13" ry="10"/><ellipse cx="57" cy="30" rx="7" ry="6"/>'
+             '<ellipse cx="62" cy="47" rx="11" ry="7"/><ellipse cx="81" cy="40" rx="5" ry="4"/>'
+             '<ellipse cx="25" cy="50" rx="10" ry="17"/><ellipse cx="42" cy="67" rx="9" ry="6"/>'
+             '<ellipse cx="74" cy="62" rx="7" ry="6"/><ellipse cx="50" cy="48" rx="6" ry="9" opacity=".6"/>')
+    body = ('<g clip-path="url(#c)"><circle cx="50" cy="50" r="48" fill="url(#g)"/>'
+            f'<g filter="url(#b)" fill="#8d8d88" opacity=".5">{maria}</g></g>') if lit else ''
+    svg = (f'<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100" width="{size}" height="{size}">'
+           '<defs><radialGradient id="g" cx="50%" cy="50%" r="50%"><stop offset="0" stop-color="#fbfbf6"/>'
+           '<stop offset=".82" stop-color="#e6e6df"/><stop offset="1" stop-color="#b8b8b1"/></radialGradient>'
+           '<filter id="b" x="-20%" y="-20%" width="140%" height="140%"><feGaussianBlur stdDeviation="1.8"/></filter>'
+           f'{lit}</defs><circle cx="50" cy="50" r="48" fill="#94a3b8" opacity=".10"/>{body}</svg>')
+    return _b64.b64encode(svg.encode("utf-8")).decode("ascii")
+
 def _moon_icon(desc):
     """Tên pha trăng (đầu chuỗi mô tả) → emoji pha trăng."""
     d = str(desc)
@@ -4483,7 +4508,7 @@ with col_right:
             <div style="flex:1;">
                 <span style="color:#94a3b8;font-size:13px;font-weight:bold;">🌙 MOON PHASE</span>
                 <div style="display:flex;align-items:center;gap:8px;margin-top:5px;">
-                    <span style="font-size:42px;line-height:1;">{_moon_icon(moon_text)}</span>
+                    <img src="data:image/svg+xml;base64,{_moon_img_b64(target_date)}" width="42" height="42" alt="moon" style="display:block;flex-shrink:0;">
                     <span style="font-size:28px;font-weight:bold;color:#fbbf24;">{moon_pct}%</span>
                 </div>
             </div>
