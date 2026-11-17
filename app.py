@@ -5201,107 +5201,169 @@ document.addEventListener("visibilitychange",function(){if(!document.hidden)tick
 else:
     st.caption("Clear Sky Forecast: weather data unavailable.")
 
-# ── MOON + SUN + MILKY WAY ALTITUDE CHART ────────────────────────────────────
+# ── SKY ALTITUDE CHART: Sun, Moon (đường liền, icon chạy theo giờ thực) + deep-sky tự chọn (nét đứt) ──────────────
 st.markdown("---")
-st.markdown("### 📊 Milkyway Altitude")
+st.markdown("### 📊 Sky Altitude")
 
 import plotly.graph_objects as go
 
-# ── Sun brightness: opacity gradient theo Sun altitude ────────────────────────
-# Sun > 0°  → cam đậm | Sun 0°~-13° → mờ dần | Sun <= -13° → tắt hẳn (full dark)
+# (id, tên, RA J2000 h:m:s, Dec J2000 d:m:s)
+_SKY_TARGETS = [
+    ("M31",      "Andromeda Galaxy",        "0:42:44.3",  "41:16:09"),
+    ("M33",      "Triangulum Galaxy",       "1:33:50.9",  "30:39:37"),
+    ("NGC 869",  "Double Cluster",          "2:19:00",    "57:09:00"),
+    ("IC 1805",  "Heart Nebula",            "2:32:42",    "61:27:00"),
+    ("M45",      "Pleiades",                "3:47:24",    "24:07:00"),
+    ("NGC 1499", "California Nebula",       "4:03:18",    "36:25:00"),
+    ("M1",       "Crab Nebula",             "5:34:31.9",  "22:00:52"),
+    ("M42",      "Orion Nebula",            "5:35:17.3",  "-5:23:28"),
+    ("IC 434",   "Horsehead Nebula",        "5:40:59",    "-2:27:30"),
+    ("NGC 2024", "Flame Nebula",            "5:41:42",    "-1:51:00"),
+    ("NGC 2244", "Rosette Nebula",          "6:31:55",    "4:56:30"),
+    ("M81",      "Bode's Galaxy",           "9:55:33.2",  "69:03:55"),
+    ("M51",      "Whirlpool Galaxy",        "13:29:52.7", "47:11:43"),
+    ("M101",     "Pinwheel Galaxy",         "14:03:12.5", "54:20:57"),
+    ("M13",      "Hercules Cluster",        "16:41:41.2", "36:27:37"),
+    ("Rho Oph",  "Rho Ophiuchi",            "16:25:35.1", "-23:26:50"),
+    ("M20",      "Trifid Nebula",           "18:02:23",   "-23:01:48"),
+    ("M8",       "Lagoon Nebula",           "18:03:37",   "-24:23:12"),
+    ("M16",      "Eagle Nebula",            "18:18:48",   "-13:49:00"),
+    ("M17",      "Omega Nebula",            "18:20:47",   "-16:10:36"),
+    ("M57",      "Ring Nebula",             "18:53:35.1", "33:01:45"),
+    ("M27",      "Dumbbell Nebula",         "19:59:36.3", "22:43:16"),
+    ("NGC 6992", "Veil Nebula",             "20:56:24",   "31:43:00"),
+    ("NGC 7000", "North America Nebula",    "20:58:47",   "44:19:48"),
+    ("GC",       "Galactic Center (Milky Way)", "17:45:40.04", "-29:00:28.1"),
+]
+_SKY_COLORS = ["#a78bfa", "#34d399", "#f472b6", "#60a5fa", "#fb923c", "#f87171", "#2dd4bf", "#c084fc"]
+
+# ── Sun brightness: opacity gradient theo Sun altitude (nền cam nhạt dần khi trời sáng) ────────────────────────
 def _sun_bright_opacity(sun_alt):
     if sun_alt <= -13:
         return 0.0
-    op = (sun_alt + 13) / 23.0 * 0.50   # -13°→0.0, 0°→0.28, +10°→0.50
-    return round(min(max(op, 0.0), 0.50), 3)
+    return round(min(max((sun_alt + 13) / 23.0 * 0.50, 0.0), 0.50), 3)
 
-fig = go.Figure()
+@st.cache_data(ttl=3600, show_spinner=False)
+def _sky_series(lat, lon, t0_iso, n_hours, utc_off_h, target_ids, step_min=10):
+    """Độ cao Sun, Moon và các deep-sky đã chọn, mỗi 10 phút từ t0 (giờ địa phương) → đường cong mượt, đúng giờ."""
+    obs = ephem.Observer()
+    obs.lat, obs.lon = str(lat), str(lon)
+    obs.pressure = 0
+    obs.epoch = ephem.J2000
+    sun, moon = ephem.Sun(), ephem.Moon()
+    bodies = {}
+    for tid in target_ids:
+        _id, _nm, ra, dec = next(x for x in _SKY_TARGETS if x[0] == tid)
+        b = ephem.FixedBody()
+        b._ra, b._dec, b._epoch = ephem.hours(ra), ephem.degrees(dec), ephem.J2000
+        bodies[tid] = b
+    t0 = datetime.fromisoformat(t0_iso)
+    xs, out = [], {"Sun": [], "Moon": [], **{tid: [] for tid in target_ids}}
+    for k in range(int(n_hours * 60 / step_min) + 1):
+        loc = t0 + timedelta(minutes=step_min * k)
+        obs.date = ephem.Date(loc - timedelta(hours=utc_off_h))
+        xs.append(loc.isoformat())
+        sun.compute(obs);  out["Sun"].append(round(math.degrees(float(sun.alt)), 2))
+        moon.compute(obs); out["Moon"].append(round(math.degrees(float(moon.alt)), 2))
+        for tid, b in bodies.items():
+            b.compute(obs)
+            out[tid].append(round(math.degrees(float(b.alt)), 2))
+    return xs, out
 
-# ── Background brightness bands (vrect per slot) ─────────────────────────────
-_x_positions = list(range(len(hours_labels)))
-for _i, (_lbl, _sa) in enumerate(zip(hours_labels, sun_altitudes)):
-    _op = _sun_bright_opacity(_sa)
-    if _op > 0.005:
-        fig.add_vrect(
-            x0=_i - 0.5, x1=_i + 0.5,
-            fillcolor="rgba(251,146,60,1.0)",
-            opacity=_op,
-            layer="below",
-            line_width=0,
-        )
+def _sky_now_alts(lat, lon):
+    """Độ cao Mặt Trời / Mặt Trăng NGAY BÂY GIỜ."""
+    obs = ephem.Observer()
+    obs.lat, obs.lon = str(lat), str(lon)
+    obs.pressure = 0
+    obs.epoch = ephem.J2000
+    obs.date = ephem.Date(datetime.utcnow())
+    s, m = ephem.Sun(), ephem.Moon()
+    s.compute(obs); m.compute(obs)
+    return math.degrees(float(s.alt)), math.degrees(float(m.alt))
 
-# ── Moon: filled area ─────────────────────────────────────────────────────────
-fig.add_trace(go.Scatter(
-    x=_x_positions, y=moon_altitudes,
-    mode='lines',
-    name='🌙 Moon',
-    line=dict(color='#fbbf24', width=4, shape='spline', smoothing=1.0),
-    fill='tozeroy',
-    fillcolor='rgba(251,191,36,0.20)',
-    hovertemplate='%{customdata}<br>Moon: %{y:.1f}°<extra></extra>',
-    customdata=hours_labels,
-))
+def _sun_img_b64():
+    """Mặt trời: đĩa tròn 100% vàng, có quầng sáng nhẹ."""
+    import base64 as _b64
+    svg = ('<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100" width="40" height="40"><defs>'
+           '<radialGradient id="g" cx="50%" cy="50%" r="50%"><stop offset="0" stop-color="#fff7b0"/>'
+           '<stop offset=".65" stop-color="#fde047"/><stop offset="1" stop-color="#f59e0b"/></radialGradient>'
+           '<radialGradient id="h" cx="50%" cy="50%" r="50%"><stop offset=".5" stop-color="#fde047" stop-opacity=".55"/>'
+           '<stop offset="1" stop-color="#fde047" stop-opacity="0"/></radialGradient></defs>'
+           '<circle cx="50" cy="50" r="50" fill="url(#h)"/><circle cx="50" cy="50" r="30" fill="url(#g)"/></svg>')
+    return _b64.b64encode(svg.encode("utf-8")).decode("ascii")
 
-# ── Sun: dashed blue line ─────────────────────────────────────────────────────
-fig.add_trace(go.Scatter(
-    x=_x_positions, y=sun_altitudes,
-    mode='lines',
-    name='☀️ Sun',
-    line=dict(color='#38bdf8', width=4, dash='dash', shape='spline', smoothing=1.0),
-    hovertemplate='%{customdata}<br>Sun: %{y:.1f}°<extra></extra>',
-    customdata=hours_labels,
-))
+_sky_fragment = st.fragment(run_every="5m") if hasattr(st, "fragment") else (lambda f: f)
 
-# ── Milky Way GC: dashed purple ───────────────────────────────────────────────
-fig.add_trace(go.Scatter(
-    x=_x_positions, y=milkyway_altitudes,
-    mode='lines',
-    name='🌌 Milkyway',
-    line=dict(color='#a78bfa', width=3.5, dash='dash', shape='spline', smoothing=1.0),
-    hovertemplate='%{customdata}<br>Milkyway: %{y:.1f}°<extra></extra>',
-    customdata=hours_labels,
-))
+@_sky_fragment
+def _sky_chart(lat, lon, t0_iso, n_hours, utc_off_h, moon_b64):
+    """Biểu đồ độ cao. Chạy lại mỗi 5 phút (không tải lại cả trang) để icon Sun/Moon di chuyển theo giờ thực."""
+    ids = [x[0] for x in _SKY_TARGETS]
+    names = {x[0]: x[1] for x in _SKY_TARGETS}
+    _kw = dict(default=["M31"], key="sky_targets", max_selections=6, label_visibility="collapsed",
+               format_func=lambda i: f"{i} · {names[i]}")
+    try:
+        sel = st.multiselect("Deep-sky targets", ids, placeholder="Choose deep-sky targets (up to 6)", **_kw)
+    except TypeError:
+        sel = st.multiselect("Deep-sky targets", ids, **_kw)
 
-# ── Horizon rule ──────────────────────────────────────────────────────────────
-fig.add_hline(y=0, line=dict(color='#64748b', dash='dot', width=1.5))
+    xs, series = _sky_series(lat, lon, t0_iso, n_hours, utc_off_h, tuple(sel))
+    X = [datetime.fromisoformat(s) for s in xs]
+    t0, t_end = X[0], X[-1]
+    fig = go.Figure()
 
-# ── -13° rule ─────────────────────────────────────────────────────────────────
-fig.add_hline(y=-13, line=dict(color='rgba(251,146,60,0.70)', dash='dot', width=1.5),
-              annotation_text="−13°", annotation_font_color="rgba(251,146,60,0.7)",
-              annotation_position="bottom right")
+    # nền cam nhạt theo độ sáng của Mặt Trời (mỗi giờ 1 dải, tâm tại vạch giờ)
+    for i in range(int(n_hours) + 1):
+        _op = _sun_bright_opacity(series["Sun"][min(i * 6, len(X) - 1)])
+        if _op > 0.005:
+            fig.add_vrect(x0=max(t0, t0 + timedelta(hours=i - 0.5)), x1=min(t_end, t0 + timedelta(hours=i + 0.5)),
+                          fillcolor="rgba(251,146,60,1.0)", opacity=_op, layer="below", line_width=0)
 
-# ── Layout ────────────────────────────────────────────────────────────────────
-fig.update_layout(
-    height=480,
-    paper_bgcolor='rgba(0,0,0,0)',
-    plot_bgcolor='rgba(15,23,42,0.0)',
-    font=dict(color='#94a3b8', size=12),
-    xaxis=dict(
-        tickmode='array',
-        tickvals=_x_positions,
-        ticktext=hours_labels,
-        gridcolor='rgba(71,85,105,0.3)',
-        fixedrange=True,
-    ),
-    yaxis=dict(
-        gridcolor='rgba(71,85,105,0.3)',
-        title=None,
-        zeroline=False,
-        fixedrange=True,
-    ),
-    legend=dict(
-        orientation='h', yanchor='bottom', y=1.02, xanchor='left', x=0,
-        font=dict(color='#cbd5e1'),
-        bgcolor='rgba(0,0,0,0)',
-    ),
-    margin=dict(l=50, r=20, t=40, b=40),
-    hovermode='x unified',
-    dragmode=False,
-)
+    # Moon, Sun: đường LIỀN
+    fig.add_trace(go.Scatter(x=X, y=series["Moon"], mode="lines", name="🌙 Moon",
+                             line=dict(color="#fbbf24", width=4), fill="tozeroy", fillcolor="rgba(251,191,36,0.20)",
+                             hovertemplate="Moon: %{y:.1f}°<extra></extra>"))
+    fig.add_trace(go.Scatter(x=X, y=series["Sun"], mode="lines", name="☀️ Sun",
+                             line=dict(color="#38bdf8", width=4),
+                             hovertemplate="Sun: %{y:.1f}°<extra></extra>"))
+    # deep-sky: đường NÉT ĐỨT
+    for j, tid in enumerate(sel):
+        fig.add_trace(go.Scatter(x=X, y=series[tid], mode="lines", name=f"{tid} {names[tid]}",
+                                 line=dict(color=_SKY_COLORS[j % len(_SKY_COLORS)], width=3.5, dash="dash"),
+                                 hovertemplate=tid + ": %{y:.1f}°<extra></extra>"))
 
-st.plotly_chart(fig, use_container_width=True,
-                config={'displayModeBar': False, 'scrollZoom': False, 'doubleClick': False,
-                        'showAxisDragHandles': False})
+    fig.add_hline(y=0, line=dict(color="#64748b", dash="dot", width=1.5))      # đường chân trời
+
+    allv = [v for vals in series.values() for v in vals]
+    ymin, ymax = min(-20.0, min(allv) - 5), max(30.0, max(allv) + 8)
+
+    # icon Sun / Moon tại giờ hiện tại (cập nhật mỗi 5 phút); chỉ hiện khi "bây giờ" nằm trong khoảng giờ của biểu đồ
+    now_local = datetime.utcnow() + timedelta(hours=utc_off_h)
+    if t0 <= now_local <= t_end:
+        s_alt, m_alt = _sky_now_alts(lat, lon)
+        box_h = (ymax - ymin) * 30 / 380.0                          # ~30px theo trục y
+        box_w = n_hours * 3600 * 1000 * 30 / 260.0                  # hộp rộng dư (ms); sizing='contain' giữ icon tròn
+        for src, alt in ((f"data:image/svg+xml;base64,{_sun_img_b64()}", s_alt),
+                         (f"data:image/svg+xml;base64,{moon_b64}", m_alt)):
+            fig.add_layout_image(dict(source=src, xref="x", yref="y", x=now_local.isoformat(), y=alt,
+                                      sizex=box_w, sizey=box_h, xanchor="center", yanchor="middle",
+                                      sizing="contain", layer="above"))
+
+    fig.update_layout(
+        height=480, paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(15,23,42,0.0)",
+        font=dict(color="#94a3b8", size=12),
+        xaxis=dict(type="date", tickformat="%H:%M", hoverformat="%H:%M", dtick=(2 if n_hours >= 10 else 1) * 3600000,
+                   range=[t0 - timedelta(minutes=20), t_end + timedelta(minutes=20)],
+                   gridcolor="rgba(71,85,105,0.3)", fixedrange=True),
+        yaxis=dict(gridcolor="rgba(71,85,105,0.3)", title=None, zeroline=False, fixedrange=True, range=[ymin, ymax]),
+        legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="left", x=0,
+                    font=dict(color="#cbd5e1"), bgcolor="rgba(0,0,0,0)"),
+        margin=dict(l=50, r=20, t=40, b=40), hovermode="x unified", dragmode=False)
+    st.plotly_chart(fig, use_container_width=True,
+                    config={"displayModeBar": False, "scrollZoom": False, "doubleClick": False, "showAxisDragHandles": False})
+
+_sky_chart(float(st.session_state.lat), float(st.session_state.lon),
+           datetime(*desired_slots[0][:4]).isoformat(), len(desired_slots) - 1,
+           float(loc_utc_offset_h), _moon_img_b64(target_date))
 
 # Legend note
 
