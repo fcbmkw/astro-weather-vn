@@ -266,7 +266,7 @@ def get_moon_phase_percent(date_obj):
     else: desc = "Waning Crescent"
     return illum, desc
 
-def _moon_img_b64(date_obj, size=42):
+def _moon_img_b64(date_obj, size=42, ring=False):
     """Ảnh SVG (base64) của pha trăng: phần sáng tính đúng theo % hiển thị (cùng công thức với get_moon_phase_percent);
     sáng bên phải khi trăng đang tròn dần (bán cầu bắc), bên trái khi khuyết dần. Không viền; phần tối chỉ là đĩa rất mờ."""
     import base64 as _b64
@@ -288,7 +288,9 @@ def _moon_img_b64(date_obj, size=42):
            '<defs><radialGradient id="g" cx="50%" cy="50%" r="50%"><stop offset="0" stop-color="#fbfbf6"/>'
            '<stop offset=".82" stop-color="#e6e6df"/><stop offset="1" stop-color="#b8b8b1"/></radialGradient>'
            '<filter id="b" x="-20%" y="-20%" width="140%" height="140%"><feGaussianBlur stdDeviation="1.8"/></filter>'
-           f'{lit}</defs><circle cx="50" cy="50" r="48" fill="#94a3b8" opacity=".10"/>{body}</svg>')
+           f'{lit}</defs><circle cx="50" cy="50" r="48" fill="#94a3b8" opacity=".10"/>{body}'
+           + ('<circle cx="50" cy="50" r="46.5" fill="none" stroke="#cbd5e1" stroke-opacity=".9" stroke-width="3"/>' if ring else '')
+           + '</svg>')
     return _b64.b64encode(svg.encode("utf-8")).decode("ascii")
 
 def _moon_icon(desc):
@@ -4479,7 +4481,7 @@ def _sky_temp_card(lat3, lon3, left_html):
             <div style="display:flex;gap:10px;">
                 {left_html}
                 <div style="flex:1;min-width:0;{_bl}">
-                    <span style="color:#94a3b8;font-size:13px;font-weight:bold;">🌡️ TEMPERATURE</span>
+                    <span style="color:#94a3b8;font-size:12px;font-weight:bold;white-space:nowrap;">🌡️ TEMPERATURE NOW</span>
                     <div style="display:flex;align-items:center;gap:6px;margin-top:5px;line-height:1.2;">
                         <span style="font-size:28px;">{_icon}</span>
                         <span style="font-size:28px;font-weight:bold;color:{_col};">{_big}</span>
@@ -5282,14 +5284,22 @@ def _sky_now_alts(lat, lon):
     return math.degrees(float(s.alt)), math.degrees(float(m.alt))
 
 def _sun_img_b64():
-    """Mặt trời: đĩa tròn 100% vàng, có quầng sáng nhẹ."""
+    """Mặt trời: đĩa tròn 100% vàng + quầng sáng + 12 tia nắng (dài/ngắn xen kẽ) bên ngoài."""
     import base64 as _b64
+    rays = ""
+    for k in range(12):
+        ang = math.radians(k * 30)
+        r0, r1 = 36.0, (49.0 if k % 2 == 0 else 44.0)
+        rays += (f'<line x1="{50 + r0 * math.cos(ang):.1f}" y1="{50 + r0 * math.sin(ang):.1f}" '
+                 f'x2="{50 + r1 * math.cos(ang):.1f}" y2="{50 + r1 * math.sin(ang):.1f}"/>')
     svg = ('<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100" width="40" height="40"><defs>'
            '<radialGradient id="g" cx="50%" cy="50%" r="50%"><stop offset="0" stop-color="#fff7b0"/>'
            '<stop offset=".65" stop-color="#fde047"/><stop offset="1" stop-color="#f59e0b"/></radialGradient>'
-           '<radialGradient id="h" cx="50%" cy="50%" r="50%"><stop offset=".5" stop-color="#fde047" stop-opacity=".55"/>'
+           '<radialGradient id="h" cx="50%" cy="50%" r="50%"><stop offset=".55" stop-color="#fde047" stop-opacity=".45"/>'
            '<stop offset="1" stop-color="#fde047" stop-opacity="0"/></radialGradient></defs>'
-           '<circle cx="50" cy="50" r="50" fill="url(#h)"/><circle cx="50" cy="50" r="30" fill="url(#g)"/></svg>')
+           '<circle cx="50" cy="50" r="46" fill="url(#h)"/>'
+           f'<g stroke="#fbbf24" stroke-width="4.5" stroke-linecap="round">{rays}</g>'
+           '<circle cx="50" cy="50" r="27" fill="url(#g)"/></svg>')
     return _b64.b64encode(svg.encode("utf-8")).decode("ascii")
 
 _sky_fragment = st.fragment(run_every="5m") if hasattr(st, "fragment") else (lambda f: f)
@@ -5363,7 +5373,7 @@ def _sky_chart(lat, lon, t0_iso, n_hours, utc_off_h, moon_b64):
 
 _sky_chart(float(st.session_state.lat), float(st.session_state.lon),
            datetime(*desired_slots[0][:4]).isoformat(), len(desired_slots) - 1,
-           float(loc_utc_offset_h), _moon_img_b64(target_date))
+           float(loc_utc_offset_h), _moon_img_b64(target_date, ring=True))
 
 # Legend note
 
