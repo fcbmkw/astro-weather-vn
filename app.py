@@ -288,9 +288,10 @@ def _moon_img_b64(date_obj, size=42, ring=False):
            '<defs><radialGradient id="g" cx="50%" cy="50%" r="50%"><stop offset="0" stop-color="#fbfbf6"/>'
            '<stop offset=".82" stop-color="#e6e6df"/><stop offset="1" stop-color="#b8b8b1"/></radialGradient>'
            '<filter id="b" x="-20%" y="-20%" width="140%" height="140%"><feGaussianBlur stdDeviation="1.8"/></filter>'
-           f'{lit}</defs><circle cx="50" cy="50" r="48" fill="#94a3b8" opacity=".10"/>{body}'
-           + ('<circle cx="50" cy="50" r="46.5" fill="none" stroke="#cbd5e1" stroke-opacity=".9" stroke-width="3"/>' if ring else '')
-           + '</svg>')
+           f'{lit}</defs>'
+           + ('<circle cx="50" cy="50" r="48" fill="#1e293b"/>' if ring     # icon biểu đồ: nền đĩa TỐI → thấy cả khi trăng 0%
+              else '<circle cx="50" cy="50" r="48" fill="#94a3b8" opacity=".10"/>')
+           + body + '</svg>')
     return _b64.b64encode(svg.encode("utf-8")).decode("ascii")
 
 def _moon_icon(desc):
@@ -5352,10 +5353,10 @@ def _sky_chart(lat, lon, t0_iso, n_hours, utc_off_h, moon_b64):
         s_alt, m_alt = _sky_now_alts(lat, lon)
         box_h = (ymax - ymin) * 30 / 380.0                          # ~30px theo trục y
         box_w = n_hours * 3600 * 1000 * 30 / 260.0                  # hộp rộng dư (ms); sizing='contain' giữ icon tròn
-        for src, alt in ((f"data:image/svg+xml;base64,{_sun_img_b64()}", s_alt),
-                         (f"data:image/svg+xml;base64,{moon_b64}", m_alt)):
+        for src, alt, sc in ((f"data:image/svg+xml;base64,{_sun_img_b64()}", s_alt, 1.5),     # Sun to gấp 1.5 lần
+                             (f"data:image/svg+xml;base64,{moon_b64}", m_alt, 1.0)):
             fig.add_layout_image(dict(source=src, xref="x", yref="y", x=now_local.isoformat(), y=alt,
-                                      sizex=box_w, sizey=box_h, xanchor="center", yanchor="middle",
+                                      sizex=box_w * sc, sizey=box_h * sc, xanchor="center", yanchor="middle",
                                       sizing="contain", layer="above"))
 
     fig.update_layout(
