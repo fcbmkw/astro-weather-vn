@@ -266,7 +266,7 @@ def get_moon_phase_percent(date_obj):
     else: desc = "Waning Crescent"
     return illum, desc
 
-def _moon_img_b64(date_obj, size=42, ring=False):
+def _moon_img_b64(date_obj, size=42, ring=False, halo=False):
     """Ảnh SVG (base64) của pha trăng: phần sáng tính đúng theo % hiển thị (cùng công thức với get_moon_phase_percent);
     sáng bên phải khi trăng đang tròn dần (bán cầu bắc), bên trái khi khuyết dần. Không viền; phần tối chỉ là đĩa rất mờ."""
     import base64 as _b64
@@ -284,15 +284,27 @@ def _moon_img_b64(date_obj, size=42, ring=False):
              '<ellipse cx="74" cy="62" rx="7" ry="6"/><ellipse cx="50" cy="48" rx="6" ry="9" opacity=".6"/>')
     body = ('<g clip-path="url(#c)"><circle cx="50" cy="50" r="48" fill="url(#g)"/>'
             f'<g filter="url(#b)" fill="#8d8d88" opacity=".5">{maria}</g></g>') if lit else ''
-    svg = (f'<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100" width="{size}" height="{size}">'
+    if halo:   # quầng sáng vàng: bán kính + độ đậm tỉ lệ với % phần sáng (trăng tròn = to nhất, trăng non = không có)
+        _rh = 48.0 + 46.0 * k
+        _op = min(0.85, 0.95 * k)
+        _hal = (f'<radialGradient id="hl" cx="50%" cy="50%" r="50%"><stop offset="0" stop-color="#fde68a" stop-opacity="{_op:.3f}"/>'
+                f'<stop offset="{48.0 / _rh:.3f}" stop-color="#fde68a" stop-opacity="{_op:.3f}"/>'
+                f'<stop offset="1" stop-color="#fde68a" stop-opacity="0"/></radialGradient>') if k > 0.01 else ''
+        _hal_c = f'<circle cx="50" cy="50" r="{_rh:.1f}" fill="url(#hl)"/>' if k > 0.01 else ''
+        _vb, _sz = "-50 -50 200 200", size * 2
+    else:
+        _hal = _hal_c = ''
+        _vb, _sz = "0 0 100 100", size
+    svg = (f'<svg xmlns="http://www.w3.org/2000/svg" viewBox="{_vb}" width="{_sz}" height="{_sz}">'
            '<defs><radialGradient id="g" cx="50%" cy="50%" r="50%"><stop offset="0" stop-color="#fbfbf6"/>'
            '<stop offset=".82" stop-color="#e6e6df"/><stop offset="1" stop-color="#b8b8b1"/></radialGradient>'
            '<filter id="b" x="-20%" y="-20%" width="140%" height="140%"><feGaussianBlur stdDeviation="1.8"/></filter>'
-           f'{lit}</defs>'
+           f'{lit}{_hal}</defs>{_hal_c}'
            + ('<circle cx="50" cy="50" r="48" fill="#1e293b"/>' if ring     # icon biểu đồ: nền đĩa TỐI → thấy cả khi trăng 0%
               else '<circle cx="50" cy="50" r="48" fill="#94a3b8" opacity=".10"/>')
            + body + '</svg>')
     return _b64.b64encode(svg.encode("utf-8")).decode("ascii")
+
 
 def _moon_icon(desc):
     """Tên pha trăng (đầu chuỗi mô tả) → emoji pha trăng."""
@@ -5247,7 +5259,7 @@ def _sun_bright_opacity(sun_alt):
     return round(min(max((sun_alt + 13) / 23.0 * 0.50, 0.0), 0.50), 3)
 
 @st.cache_data(ttl=3600, show_spinner=False)
-def _sky_series(lat, lon, t0_iso, n_hours, utc_off_h, target_ids, step_min=10):
+def _sky_series(lat, lon, t0_iso, n_hours, utc_off_h, target_ids, step_min=5):
     """Độ cao Sun, Moon và các deep-sky đã chọn, mỗi 10 phút từ t0 (giờ địa phương) → đường cong mượt, đúng giờ."""
     obs = ephem.Observer()
     obs.lat, obs.lon = str(lat), str(lon)
@@ -5306,8 +5318,19 @@ def _sun_img_b64():
 _sky_fragment = st.fragment(run_every="5m") if hasattr(st, "fragment") else (lambda f: f)
 
 @_sky_fragment
-def _sky_chart(lat, lon, t0_iso, n_hours, utc_off_h, moon_b64):
-    """Biểu đồ độ cao. Chạy lại mỗi 5 phút (không tải lại cả trang) để icon Sun/Moon di chuyển theo giờ thực."""
+def _sky_chart(lat, lon, utc_off_h):
+    """Biểu đồ độ cao theo THỜI GIAN THỰC. Dữ liệu 72h [now−24h, now+48h]; khung nhìn mặc định 12h [now−3h, now+9h].
+    Kéo chuột / vuốt tay sang trái-phải để xem thời điểm khác. Chạy lại mỗi 5 phút: nếu chưa kéo thì khung tự trượt theo
+    giờ thực, nếu đã kéo (uirevision) thì giữ nguyên vị trí đang xem. Icon Sun/Moon luôn nằm ở vạch "now"."""
+    _STEP = 5                                   # phút / mẫu — khớp với chu kỳ rerun của fragment
+    now_local = datetime.utcnow() + timedelta(hours=utc_off_h)
+    now_local = now_local.replace(second=0, microsecond=0)
+    now_local -= timedelta(minutes=now_local.minute % _STEP)
+    data_t0 = now_local - timedelta(hours=24)
+    data_h = 72
+    view_a, view_b = now_local - timedelta(hours=3), now_local + timedelta(hours=9)
+    moon_b64 = _moon_img_b64(now_local, ring=True, halo=True)
+
     ids = [x[0] for x in _SKY_TARGETS]
     names = {x[0]: x[1] for x in _SKY_TARGETS}
     _kw = dict(default=["M31"], key="sky_targets", max_selections=6, label_visibility="collapsed",
@@ -5317,64 +5340,91 @@ def _sky_chart(lat, lon, t0_iso, n_hours, utc_off_h, moon_b64):
     except TypeError:
         sel = st.multiselect("Deep-sky targets", ids, **_kw)
 
-    xs, series = _sky_series(lat, lon, t0_iso, n_hours, utc_off_h, tuple(sel))
+    xs, series = _sky_series(lat, lon, data_t0.isoformat(), data_h, utc_off_h, tuple(sel), _STEP)
     X = [datetime.fromisoformat(s) for s in xs]
     t0, t_end = X[0], X[-1]
     fig = go.Figure()
 
-    # nền cam nhạt theo độ sáng của Mặt Trời (mỗi giờ 1 dải, tâm tại vạch giờ)
-    for i in range(int(n_hours) + 1):
-        _op = _sun_bright_opacity(series["Sun"][min(i * 6, len(X) - 1)])
-        if _op > 0.005:
-            fig.add_vrect(x0=max(t0, t0 + timedelta(hours=i - 0.5)), x1=min(t_end, t0 + timedelta(hours=i + 0.5)),
-                          fillcolor="rgba(251,146,60,1.0)", opacity=_op, layer="below", line_width=0)
+    # nền cam theo độ sáng Mặt Trời: 1 heatmap mịn (mỗi mẫu 5 phút, nội suy) thay cho các dải theo giờ
+    _z = [_sun_bright_opacity(v) for v in series["Sun"]]
+    fig.add_trace(go.Heatmap(x=X, y=[-1000, 1000], z=[_z, _z], zmin=0, zmax=0.5, zsmooth="best",
+                             colorscale=[[0, "rgba(251,146,60,0)"], [1, "rgba(251,146,60,0.55)"]],
+                             showscale=False, hoverinfo="skip", xgap=0, ygap=0))
 
     # Moon, Sun: đường LIỀN
-    fig.add_trace(go.Scatter(x=X, y=series["Moon"], mode="lines", name="🌙 Moon",
-                             line=dict(color="#fbbf24", width=4), fill="tozeroy", fillcolor="rgba(251,191,36,0.20)",
-                             hovertemplate="Moon: %{y:.1f}°<extra></extra>"))
-    fig.add_trace(go.Scatter(x=X, y=series["Sun"], mode="lines", name="☀️ Sun",
-                             line=dict(color="#38bdf8", width=4),
-                             hovertemplate="Sun: %{y:.1f}°<extra></extra>"))
+    fig.add_trace(go.Scatter(x=X, y=series["Moon"], mode="lines", name="🌙 Moon", hoverinfo="skip",
+                             line=dict(color="#fbbf24", width=4), fill="tozeroy", fillcolor="rgba(251,191,36,0.20)"))
+    fig.add_trace(go.Scatter(x=X, y=series["Sun"], mode="lines", name="☀️ Sun", hoverinfo="skip",
+                             line=dict(color="#38bdf8", width=4)))
     # deep-sky: đường NÉT ĐỨT
     for j, tid in enumerate(sel):
-        fig.add_trace(go.Scatter(x=X, y=series[tid], mode="lines", name=f"{tid} {names[tid]}",
-                                 line=dict(color=_SKY_COLORS[j % len(_SKY_COLORS)], width=3.5, dash="dash"),
-                                 hovertemplate=tid + ": %{y:.1f}°<extra></extra>"))
+        fig.add_trace(go.Scatter(x=X, y=series[tid], mode="lines", name=f"{tid} {names[tid]}", hoverinfo="skip",
+                                 line=dict(color=_SKY_COLORS[j % len(_SKY_COLORS)], width=3.5, dash="dash")))
 
     fig.add_hline(y=0, line=dict(color="#64748b", dash="dot", width=1.5))      # đường chân trời
+    fig.add_shape(type="line", xref="x", yref="paper", x0=now_local, x1=now_local, y0=0, y1=1,
+                  line=dict(color="rgba(250,204,21,0.55)", dash="dot", width=1.5))   # vạch "now"
+    # vạch nửa đêm + ngày, để biết đang xem ngày nào khi kéo sang hai bên
+    _tk = datetime(t0.year, t0.month, t0.day)
+    while _tk < t_end:
+        if _tk >= t0 and _tk.hour % 6 == 0:
+            _m = _tk.hour == 0
+            fig.add_shape(type="line", xref="x", yref="paper", x0=_tk, x1=_tk, y0=0, y1=1, layer="below",
+                          line=dict(color="rgba(203,213,225,0.80)" if _m else "rgba(148,163,184,0.70)",
+                                    dash="solid", width=1.6 if _m else 1.2))
+            if _m:
+                fig.add_annotation(x=_tk, xref="x", y=1, yref="paper", yanchor="bottom", showarrow=False,
+                                   text=f"{_tk.month}/{_tk.day}", font=dict(color="#cbd5e1", size=11))
+        _tk += timedelta(hours=6)
 
     allv = [v for vals in series.values() for v in vals]
-    ymin, ymax = min(-20.0, min(allv) - 5), max(30.0, max(allv) + 8)
+    ymin, ymax = max(-95.0, min(allv) - 6), min(95.0, max(allv) + 8)      # tự co giãn để ôm trọn mọi đối tượng đang hiển thị
 
-    # icon Sun / Moon tại giờ hiện tại (cập nhật mỗi 5 phút); chỉ hiện khi "bây giờ" nằm trong khoảng giờ của biểu đồ
-    now_local = datetime.utcnow() + timedelta(hours=utc_off_h)
-    if t0 <= now_local <= t_end:
-        s_alt, m_alt = _sky_now_alts(lat, lon)
-        box_h = (ymax - ymin) * 30 / 380.0                          # ~30px theo trục y
-        box_w = n_hours * 3600 * 1000 * 30 / 260.0                  # hộp rộng dư (ms); sizing='contain' giữ icon tròn
-        for src, alt, sc in ((f"data:image/svg+xml;base64,{_sun_img_b64()}", s_alt, 1.5),     # Sun to gấp 1.5 lần
-                             (f"data:image/svg+xml;base64,{moon_b64}", m_alt, 1.0)):
-            fig.add_layout_image(dict(source=src, xref="x", yref="y", x=now_local.isoformat(), y=alt,
-                                      sizex=box_w * sc, sizey=box_h * sc, xanchor="center", yanchor="middle",
-                                      sizing="contain", layer="above"))
+    # icon Sun / Moon ở vạch "now" (luôn nằm trong dữ liệu)
+    s_alt, m_alt = _sky_now_alts(lat, lon)
+    box_h = (ymax - ymin) * 30 / 380.0                              # ~30px theo trục y
+    box_w = 12 * 3600 * 1000 * 30 / 260.0                           # theo khung nhìn 12h; sizing='contain' giữ icon tròn
+    for src, alt, sc in ((f"data:image/svg+xml;base64,{_sun_img_b64()}", s_alt, 1.5),     # Sun to gấp 1.5 lần
+                         (f"data:image/svg+xml;base64,{moon_b64}", m_alt, 2.0)):          # Moon: ảnh có thêm quầng sáng → khung gấp đôi
+        fig.add_layout_image(dict(source=src, xref="x", yref="y", x=now_local.isoformat(), y=alt,
+                                  sizex=box_w * sc, sizey=box_h * sc, xanchor="center", yanchor="middle",
+                                  sizing="contain", layer="above"))
 
+    # KHÔNG đặt minallowed/maxallowed: khi kéo quá biên, plotly co hẹp khung thời gian (bị "phóng to"). Khung luôn giữ 12h.
+    # tick0 = nửa đêm → nhãn giờ và đường kẻ dọc cùng neo vào các mốc giờ chẵn; đường kẻ phụ mỗi 15 phút.
+    _tick0 = datetime(t0.year, t0.month, t0.day)
+    _ax = dict(type="date", tickmode="linear", tick0=_tick0, dtick=2 * 3600000, tickformat="%H:%M",
+               ticks="", ticklabelposition="inside", showgrid=True, gridcolor="rgba(71,85,105,0.45)", gridwidth=1,
+               range=[view_a, view_b], fixedrange=False)
+    try:
+        fig.update_layout(xaxis=dict(**_ax, minor=dict(tick0=_tick0, dtick=900000, showgrid=True,
+                                                         gridcolor="rgba(71,85,105,0.18)", gridwidth=1, ticks="")))
+    except Exception:   # plotly cũ chưa có minor grid
+        fig.update_layout(xaxis=_ax)
+    try:   # plotly mới: đẩy nhãn trục vào trong khỏi mép; bản cũ bỏ qua
+        fig.update_layout(xaxis=dict(ticklabelstandoff=6), yaxis=dict(ticklabelstandoff=8))
+        _so = True
+    except Exception:
+        _so = False
     fig.update_layout(
         height=480, paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(15,23,42,0.0)",
         font=dict(color="#94a3b8", size=12),
-        xaxis=dict(type="date", tickformat="%H:%M", hoverformat="%H:%M", dtick=(2 if n_hours >= 10 else 1) * 3600000,
-                   range=[t0 - timedelta(minutes=20), t_end + timedelta(minutes=20)],
-                   gridcolor="rgba(71,85,105,0.3)", fixedrange=True),
-        yaxis=dict(gridcolor="rgba(71,85,105,0.3)", title=None, zeroline=False, fixedrange=True, range=[ymin, ymax]),
+        yaxis=dict(gridcolor="rgba(71,85,105,0.3)", title=None, zeroline=False, fixedrange=True, range=[ymin, ymax],
+                   tickmode="linear", tick0=0, dtick=20, ticks="", ticklabelposition="inside", automargin=False),
         legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="left", x=0,
                     font=dict(color="#cbd5e1"), bgcolor="rgba(0,0,0,0)"),
-        margin=dict(l=50, r=20, t=40, b=40), hovermode="x unified", dragmode=False)
+        margin=dict(l=4, r=4, t=40, b=4), hovermode=False, dragmode="pan",
+        uirevision=f"sky-{lat:.3f}-{lon:.3f}")
     st.plotly_chart(fig, use_container_width=True,
-                    config={"displayModeBar": False, "scrollZoom": False, "doubleClick": False, "showAxisDragHandles": False})
+                    config={"displayModeBar": False, "scrollZoom": False, "doubleClick": False,
+                            "showAxisDragHandles": False, "staticPlot": False})
 
-_sky_chart(float(st.session_state.lat), float(st.session_state.lon),
-           datetime(*desired_slots[0][:4]).isoformat(), len(desired_slots) - 1,
-           float(loc_utc_offset_h), _moon_img_b64(target_date, ring=True))
+st.markdown("""<style>
+/* Sky Altitude: con trỏ bàn tay (grab) thay cho mũi tên 4 hướng khi kéo trái/phải */
+.js-plotly-plot .nsewdrag, .js-plotly-plot .drag, .js-plotly-plot .cursor-move { cursor: grab !important; }
+.js-plotly-plot .nsewdrag:active, .js-plotly-plot .drag:active { cursor: grabbing !important; }
+</style>""", unsafe_allow_html=True)
+_sky_chart(float(st.session_state.lat), float(st.session_state.lon), float(loc_utc_offset_h))
 
 # Legend note
 
