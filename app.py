@@ -215,6 +215,60 @@ st.markdown("""
 </style>
 """, unsafe_allow_html=True)
 
+UI_AURORA = True   # False = quay về giao diện phẳng như cũ
+
+if UI_AURORA:
+    st.markdown("""
+<style>
+.stApp {
+    background:
+        radial-gradient(1100px 560px at 8% -8%,  rgba(56,189,248,.16), transparent 60%),
+        radial-gradient(900px 520px at 96% 2%,   rgba(167,139,250,.16), transparent 60%),
+        radial-gradient(900px 520px at 50% 112%, rgba(52,211,153,.09),  transparent 60%),
+        #060a14 !important;
+    background-attachment: fixed !important;
+}
+/* Bầu trời sao lấp lánh (CSS thuần, không ảnh hưởng layout) */
+.stApp::before, .stApp::after {
+    content: ""; position: fixed; top: 0; left: 0; width: 2px; height: 2px;
+    background: transparent; pointer-events: none; z-index: 0;
+}
+.stApp::before { box-shadow: __S1__; animation: twinkle-a 5s ease-in-out infinite; }
+.stApp::after  { width: 3px; height: 3px; box-shadow: __S2__; animation: twinkle-b 7s ease-in-out infinite; }
+@keyframes twinkle-a { 0%,100% { opacity: .85; } 50% { opacity: .25; } }
+@keyframes twinkle-b { 0%,100% { opacity: .25; } 50% { opacity: .9; } }
+
+/* Card kính mờ (glassmorphism) */
+.metric-card {
+    background: linear-gradient(145deg, rgba(30,41,59,.55), rgba(15,23,42,.42)) !important;
+    -webkit-backdrop-filter: blur(16px) saturate(150%); backdrop-filter: blur(16px) saturate(150%);
+    border: 1px solid rgba(255,255,255,.09) !important;
+    box-shadow: 0 10px 32px rgba(0,0,0,.40), inset 0 1px 0 rgba(255,255,255,.10) !important;
+}
+/* Bảng thời tiết: kính tối viền cam neon */
+.wx-card {
+    background: linear-gradient(180deg, rgba(40,18,6,.78), rgba(18,8,2,.86)) !important;
+    -webkit-backdrop-filter: blur(14px); backdrop-filter: blur(14px);
+    border: 1px solid rgba(251,146,60,.45) !important;
+    box-shadow: 0 12px 36px rgba(0,0,0,.50), 0 0 34px rgba(251,146,60,.16), inset 0 1px 0 rgba(255,255,255,.08) !important;
+}
+.wx-card .wx-table thead tr { background: linear-gradient(90deg, rgba(234,88,12,.55), rgba(124,45,18,.55)) !important; }
+/* Tiêu đề section */
+.stMarkdown h3 { letter-spacing: .02em; text-shadow: 0 0 22px rgba(56,189,248,.25); }
+hr { border-color: rgba(148,163,184,.18) !important; }
+/* Khung chat kính mờ */
+div[data-testid="stChatInput"] > div {
+    background: rgba(15,23,42,.62) !important;
+    -webkit-backdrop-filter: blur(12px); backdrop-filter: blur(12px);
+}
+div[class*="st-key-astro_ai_answer_box"] {
+    background: rgba(15,23,42,.55) !important;
+    -webkit-backdrop-filter: blur(12px); backdrop-filter: blur(12px);
+    border: 1px solid rgba(255,255,255,.09) !important; border-radius: 12px !important;
+}
+</style>
+""".replace("__S1__", "663px 308px rgba(226,232,240,0.75),808px 98px rgba(226,232,240,0.75),148px 1097px rgba(226,232,240,0.75),192px 748px rgba(226,232,240,0.75),1193px 118px rgba(226,232,240,0.75),1863px 1039px rgba(226,232,240,0.75),439px 76px rgba(226,232,240,0.75),176px 888px rgba(226,232,240,0.75),856px 143px rgba(226,232,240,0.75),492px 185px rgba(226,232,240,0.75),1128px 869px rgba(226,232,240,0.75),121px 253px rgba(226,232,240,0.75),457px 126px rgba(226,232,240,0.75),1181px 812px rgba(226,232,240,0.75),101px 452px rgba(226,232,240,0.75),95px 272px rgba(226,232,240,0.75),593px 858px rgba(226,232,240,0.75),295px 241px rgba(226,232,240,0.75),1169px 631px rgba(226,232,240,0.75),1147px 370px rgba(226,232,240,0.75),211px 384px rgba(226,232,240,0.75),762px 199px rgba(226,232,240,0.75),1121px 128px rgba(226,232,240,0.75),1155px 122px rgba(226,232,240,0.75),1267px 421px rgba(226,232,240,0.75),1016px 1088px rgba(226,232,240,0.75),875px 643px rgba(226,232,240,0.75),953px 928px rgba(226,232,240,0.75),740px 613px rgba(226,232,240,0.75),508px 368px rgba(226,232,240,0.75),1431px 499px rgba(226,232,240,0.75),167px 614px rgba(226,232,240,0.75),1075px 1013px rgba(226,232,240,0.75),1792px 703px rgba(226,232,240,0.75),1493px 919px rgba(226,232,240,0.75),589px 149px rgba(226,232,240,0.75),241px 1048px rgba(226,232,240,0.75),856px 337px rgba(226,232,240,0.75),1550px 700px rgba(226,232,240,0.75),311px 1001px rgba(226,232,240,0.75),863px 80px rgba(226,232,240,0.75),1368px 158px rgba(226,232,240,0.75),1565px 642px rgba(226,232,240,0.75),696px 717px rgba(226,232,240,0.75),1217px 1017px rgba(226,232,240,0.75),1187px 934px rgba(226,232,240,0.75),140px 191px rgba(226,232,240,0.75),552px 970px rgba(226,232,240,0.75),1427px 133px rgba(226,232,240,0.75),124px 634px rgba(226,232,240,0.75),1325px 912px rgba(226,232,240,0.75),582px 790px rgba(226,232,240,0.75),1816px 710px rgba(226,232,240,0.75),46px 945px rgba(226,232,240,0.75),727px 344px rgba(226,232,240,0.75),1251px 239px rgba(226,232,240,0.75),1011px 120px rgba(226,232,240,0.75),446px 588px rgba(226,232,240,0.75),264px 507px rgba(226,232,240,0.75),814px 800px rgba(226,232,240,0.75),1877px 1016px rgba(226,232,240,0.75),165px 340px rgba(226,232,240,0.75),919px 822px rgba(226,232,240,0.75),1125px 569px rgba(226,232,240,0.75),1809px 280px rgba(226,232,240,0.75),1677px 881px rgba(226,232,240,0.75),1769px 570px rgba(226,232,240,0.75),1446px 850px rgba(226,232,240,0.75),734px 779px rgba(226,232,240,0.75),472px 309px rgba(226,232,240,0.75)").replace("__S2__", "169px 360px rgba(226,232,240,0.95),309px 475px rgba(226,232,240,0.95),1348px 477px rgba(226,232,240,0.95),24px 993px rgba(226,232,240,0.95),1702px 373px rgba(226,232,240,0.95),538px 577px rgba(226,232,240,0.95),8px 298px rgba(226,232,240,0.95),858px 1094px rgba(226,232,240,0.95),756px 652px rgba(226,232,240,0.95),257px 1055px rgba(226,232,240,0.95),1264px 110px rgba(226,232,240,0.95),935px 803px rgba(226,232,240,0.95),815px 817px rgba(226,232,240,0.95),807px 212px rgba(226,232,240,0.95),986px 820px rgba(226,232,240,0.95),127px 390px rgba(226,232,240,0.95),137px 427px rgba(226,232,240,0.95),902px 332px rgba(226,232,240,0.95),225px 696px rgba(226,232,240,0.95),1230px 107px rgba(226,232,240,0.95),209px 0px rgba(226,232,240,0.95),1160px 309px rgba(226,232,240,0.95)"), unsafe_allow_html=True)
+
 # ── SESSION STATE ────────────────────────────────────────────────────────────
 for k, v in [("lat", 21.0285), ("lon", 105.8542),
              ("map_center", [21.0285, 105.8542]), ("zoom", 6),
@@ -2206,25 +2260,18 @@ st.markdown(
         margin-bottom: 0 !important;
     }
 
-    /* New Chat button nằm trong chatbox, cạnh nút gửi */
-    .st-key-astro_ai_panel { position: relative; }
-    .st-key-astro_ai_panel [data-testid="stElementContainer"]:has(.st-key-astro_newchat_btn) {
-        position: absolute !important;
-        top: 6px; right: 42px;
-        width: 26px !important; height: 26px !important;
-        margin: 0 !important; z-index: 20;
+    /* New Chat: nút Streamlit gốc bị ẩn; nút hiển thị (.nc-btn) do JS chèn vào trong chatbox, cạnh nút gửi */
+    .st-key-astro_ai_panel [data-testid="stElementContainer"]:has(.st-key-astro_newchat_btn) { display: none !important; }
+    .nc-btn {
+        flex: 0 0 auto; width: 26px; height: 26px; margin: 0 4px 0 0; padding: 0;
+        display: inline-flex; align-items: center; justify-content: center;
+        border: none; border-radius: 8px; background: transparent; color: #94a3b8; cursor: pointer;
+        transition: color .2s ease, background .2s ease;
     }
-    .st-key-astro_newchat_btn button {
-        width: 26px !important; height: 26px !important;
-        min-height: 26px !important; padding: 0 !important;
-        border: none !important; background: transparent !important;
-        color: #94a3b8 !important;
-    }
-    .st-key-astro_newchat_btn button:hover { color: #38bdf8 !important; background: rgba(56,189,248,.12) !important; }
-    div[data-testid="stChatInput"] textarea { padding-right: 38px !important; }
-    .st-key-astro_newchat_btn button:active,
-    .st-key-astro_newchat_btn button:focus { transform: none !important; box-shadow: none !important; outline: none !important; }
-    .st-key-astro_newchat_btn button { transition: color .2s ease, background .2s ease !important; }
+    .nc-btn:hover { color: #38bdf8; background: rgba(56,189,248,.14); }
+    .nc-btn:active { transform: none; }
+    .nc-btn svg { width: 16px; height: 16px; fill: currentColor; pointer-events: none; }
+    div[data-testid="stChatInput"] textarea { padding-right: 8px !important; }
     div[data-testid="stChatInput"] > div {
         border-radius: 12px !important;
         border: 1px solid rgba(148,163,184,.28) !important;
@@ -4239,6 +4286,29 @@ _mkw_comp.html("""<script>
   };
   P.__mkwXh = h; D.addEventListener('click', h, true);
 }catch(err){ console.log('[mkw] bridge error', err); }})();
+(function(){try{
+  var P = window.parent, D = P.document;
+  if (P.__ncObs) { P.__ncObs.disconnect(); }
+  var ICON = '<svg viewBox="0 0 24 24"><path d="M5 3h8.5l-2 2H5v14h14v-6.5l2-2V19a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2zm14.6.4 1.9 1.9a1 1 0 0 1 0 1.4L12 15.2 9 16l.8-3L18.2 3.4a1 1 0 0 1 1.4 0z"/></svg>';
+  function ensure() {
+    var ci = D.querySelector('[data-testid="stChatInput"]');
+    if (!ci || ci.querySelector('.nc-btn')) return;
+    var send = ci.querySelector('button');
+    if (!send || !send.parentNode) return;
+    var b = D.createElement('button');
+    b.type = 'button'; b.className = 'nc-btn'; b.title = 'New chat'; b.innerHTML = ICON;
+    b.addEventListener('click', function(e) {
+      e.preventDefault(); e.stopPropagation();
+      var t = D.querySelector('.st-key-astro_newchat_btn button');
+      if (t) t.click();
+    });
+    send.parentNode.insertBefore(b, send);
+  }
+  ensure();
+  var o = new P.MutationObserver(ensure);
+  o.observe(D.body, { childList: true, subtree: true });
+  P.__ncObs = o;
+}catch(err){ console.log('[nc] error', err); }})();
 </script>""", height=0)
 
 # ── LPM EXTERNAL LINK ─────────────────────────────────────────────────────────
