@@ -2261,7 +2261,9 @@ st.markdown(
     }
 
     /* New Chat: nút Streamlit gốc bị ẩn; nút hiển thị (.nc-btn) do JS chèn vào trong chatbox, cạnh nút gửi */
-    .st-key-astro_ai_panel [data-testid="stElementContainer"]:has(.st-key-astro_newchat_btn) { display: none !important; }
+    .st-key-astro_newchat_btn,
+    [data-testid="stElementContainer"]:has(> .st-key-astro_newchat_btn),
+    [data-testid="stLayoutWrapper"]:has(> .st-key-astro_newchat_btn) { display: none !important; }
     .nc-btn {
         flex: 0 0 auto; width: 26px; height: 26px; margin: 0 4px 0 0; padding: 0;
         display: inline-flex; align-items: center; justify-content: center;
@@ -4290,7 +4292,15 @@ _mkw_comp.html("""<script>
   var P = window.parent, D = P.document;
   if (P.__ncObs) { P.__ncObs.disconnect(); }
   var ICON = '<svg viewBox="0 0 24 24"><path d="M5 3h8.5l-2 2H5v14h14v-6.5l2-2V19a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2zm14.6.4 1.9 1.9a1 1 0 0 1 0 1.4L12 15.2 9 16l.8-3L18.2 3.4a1 1 0 0 1 1.4 0z"/></svg>';
+  function hideOrig() {
+    var kb = D.querySelector('.st-key-astro_newchat_btn');
+    if (!kb) return;
+    var x = kb;
+    while (x.parentElement && x.parentElement.children.length === 1) { x = x.parentElement; }
+    x.style.setProperty('display', 'none', 'important');
+  }
   function ensure() {
+    hideOrig();
     var ci = D.querySelector('[data-testid="stChatInput"]');
     if (!ci || ci.querySelector('.nc-btn')) return;
     var send = ci.querySelector('button');
@@ -4950,9 +4960,9 @@ with col_left:
                 icon, col = '\U0001f325\ufe0f', '#94a3b8'
             else:
                 icon, col = '\u2601\ufe0f', '#64748b'
-            return (f'<div style="display:flex;align-items:center;gap:2px;white-space:nowrap;">'
-                    f'<span style="font-size:15px;line-height:1;">{icon}</span>'
-                    f'<span style="font-size:11px;color:{col};font-weight:600;">{pct_str}</span>'
+            return (f'<div style="display:flex;align-items:center;gap:3px;white-space:nowrap;">'
+                    f'<span style="font-size:18px;line-height:1;">{icon}</span>'
+                    f'<span style="font-size:14px;color:{col};font-weight:700;margin-left:2px;">{pct_str}</span>'
                     + (f'<details name="spreadwarn" style="display:inline-block;position:relative;">'
                        f'<summary '
                        f'style="display:inline-block;list-style:none;cursor:pointer;font-size:13px;color:#f59e0b;padding:0 2px;">\u26a0</summary>'
@@ -4968,7 +4978,7 @@ with col_left:
             if ws < 2:   icon,col = '','#94a3b8'
             elif ws < 5: icon,col = '','#60a5fa'
             else:        icon,col = '','#f97316'
-            return f'<span style="color:{col}">{icon} {ws_str}</span>'
+            return f'<span style="color:{col};white-space:nowrap;">{icon} {ws_str}</span>'
 
         rows_html = ''
         for i, row in enumerate(weather_table_data):
@@ -4992,7 +5002,7 @@ with col_left:
                 f'<td style="padding:8px 6px;font-weight:700;color:#fb923c;white-space:nowrap;">{time_lbl}</td>'
                 f'<td style="padding:8px 6px;overflow:visible;">{cloud_cell}</td>'
                 f'<td style="padding:8px 6px;color:#fb923c;font-size:13px;white-space:nowrap;">{humid_cell}</td>'
-                f'<td style="padding:8px 6px;color:#fb923c;">{wind_cell}</td>'
+                f'<td style="padding:8px 6px;color:#fb923c;white-space:nowrap;">{wind_cell}</td>'
                 f'<td style="padding:8px 4px;font-size:22px;line-height:1;letter-spacing:0;white-space:nowrap;">{stars}</td>'
                 f'</tr>'
             )
@@ -5002,11 +5012,11 @@ with col_left:
   <table class="wx-table">
     <thead>
       <tr style="background:linear-gradient(90deg,rgba(154,52,18,0.95),rgba(110,36,10,0.80));">
-        <th style="padding:11px 8px;text-align:left;color:#fdba74;font-weight:700;width:14%;">⏰</th>
-        <th style="padding:11px 8px;text-align:left;color:#fdba74;font-weight:700;width:18%;">🌤️</th>
+        <th style="padding:11px 8px;text-align:left;color:#fdba74;font-weight:700;width:13%;">⏰</th>
+        <th style="padding:11px 8px;text-align:left;color:#fdba74;font-weight:700;width:21%;">🌤️</th>
         <th title="Temperature / Humidity" style="padding:11px 8px;text-align:left;color:#fdba74;font-weight:700;width:21%;white-space:nowrap;">🌡️/💧</th>
-        <th style="padding:11px 8px;text-align:left;color:#fdba74;font-weight:700;width:16%;">💨</th>
-        <th style="padding:11px 6px;text-align:left;color:#fdba74;font-weight:700;width:31%;">📸</th>
+        <th style="padding:11px 8px;text-align:left;color:#fdba74;font-weight:700;width:19%;">💨</th>
+        <th style="padding:11px 6px;text-align:left;color:#fdba74;font-weight:700;width:26%;">📸</th>
       </tr>
     </thead>
     <tbody>{rows_html}</tbody>
