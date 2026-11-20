@@ -139,13 +139,42 @@ st.markdown("""
     .block-container { padding-top: 0.8rem; padding-bottom: 0.8rem; padding-left: 2rem; padding-right: 2rem; }
     iframe { width: 100% !important; }
     .stTable table { width: 100% !important; margin-bottom: 0px !important; }
+    @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap');
+    .stApp { font-family: 'Inter', 'Segoe UI', sans-serif; }
+    [data-testid="stMainBlockContainer"] { padding-top: 0.8rem !important; }
     .metric-card {
-        background-color: #1e293b;
+        background: linear-gradient(145deg, rgba(30,41,59,.96), rgba(15,23,42,.96));
         padding: 15px;
-        border-radius: 10px;
-        border: 1px solid #334155;
+        border-radius: 14px;
+        border: 1px solid rgba(148,163,184,.18);
         margin-bottom: 12px;
+        box-shadow: 0 8px 24px rgba(0,0,0,.35), inset 0 1px 0 rgba(255,255,255,.06);
+        position: relative; overflow: hidden;
+        transition: transform .2s ease, border-color .2s ease;
     }
+    .metric-card::before {
+        content: ""; position: absolute; inset: 0 0 auto 0; height: 2px;
+        background: linear-gradient(90deg, transparent, #38bdf8, transparent); opacity: .65;
+    }
+    .metric-card:hover { transform: translateY(-2px); border-color: rgba(56,189,248,.45); }
+    .wx-card {
+        background: linear-gradient(180deg, #1f0e03, #140800);
+        border: 1px solid rgba(251,146,60,.38);
+        border-radius: 16px; overflow: hidden; margin-bottom: 8px;
+        box-shadow: 0 10px 30px rgba(0,0,0,.45), 0 0 24px rgba(234,88,12,.12), inset 0 1px 0 rgba(255,255,255,.06);
+    }
+    .wx-card table.wx-table {
+        width: 100%; table-layout: fixed; border-collapse: collapse;
+        margin: 0 !important; border: none !important; font-size: 14px;
+        font-variant-numeric: tabular-nums;
+    }
+    .wx-card .wx-table th, .wx-card .wx-table td {
+        border: none !important;
+        border-bottom: 1px solid rgba(251,146,60,.14) !important;
+    }
+    .wx-card .wx-table tbody tr:last-child td { border-bottom: none !important; }
+    .wx-card .wx-table tbody tr { transition: background .15s ease; }
+    .wx-card .wx-table tbody tr:hover { background: rgba(251,146,60,.18) !important; }
     .source-card {
         background-color: #1e293b;
         border-radius: 10px;
@@ -2074,33 +2103,6 @@ if st.session_state.map_tile not in ("satellite", "himawari", "windy"):
 # align-items: center chỉ canh giữa theo chiều NGANG chứ không phải dọc.
 # ==============================================================================
 
-# --- NÚT NEW CHAT — góc trên-phải màn hình, position:fixed ---
-st.markdown(
-    """
-    <style>
-    .st-key-astro_newchat_btn {
-        position: fixed !important;
-        top: 0.85rem !important;
-        right: 0.9rem !important;
-        z-index: 999999 !important;
-        width: 40px !important;
-    }
-    .st-key-astro_newchat_btn button {
-        width: 40px !important;
-        height: 40px !important;
-    }
-    </style>
-    """,
-    unsafe_allow_html=True,
-)
-with st.container(key="astro_newchat_btn"):
-    if st.button("", key="astro_new_chat", icon=":material/edit_square:", help="New chat", use_container_width=True):
-        st.session_state.astro_ai_history = []
-        st.session_state.astro_ai_answer = None
-        st.session_state.astro_last_question = "Hỏi AI tìm địa điểm & thời điểm chụp ảnh milkyway..."
-        st.session_state.astro_last_processed_query = None
-        st.rerun()
-
 # --- CSS: chatbox gọn (bản đã "vừa mắt"), chỉ thêm flex-direction: row để
 # sửa lệch nút gửi, ẩn toolbar Streamlit ---
 st.markdown(
@@ -2195,6 +2197,27 @@ st.markdown(
     div[class*="st-key-astro_ai_answer_box"] *:last-child {
         margin-bottom: 0 !important;
     }
+
+    /* New Chat button nằm trong chatbox, cạnh nút gửi */
+    .st-key-astro_ai_panel { position: relative; }
+    .st-key-astro_ai_panel [data-testid="stElementContainer"]:has(.st-key-astro_newchat_btn) {
+        position: absolute !important;
+        top: 6px; right: 44px;
+        width: 26px !important; height: 26px !important;
+        margin: 0 !important; z-index: 20;
+    }
+    .st-key-astro_newchat_btn button {
+        width: 26px !important; height: 26px !important;
+        min-height: 26px !important; padding: 0 !important;
+        border: none !important; background: transparent !important;
+        color: #94a3b8 !important;
+    }
+    .st-key-astro_newchat_btn button:hover { color: #38bdf8 !important; background: rgba(56,189,248,.12) !important; }
+    div[data-testid="stChatInput"] textarea { padding-right: 40px !important; }
+    /* Ẩn khung kết quả trống khi chưa có câu trả lời */
+    div[class*="st-key-astro_ai_answer_box"]:not(:has([data-testid="stMarkdownContainer"])):not(:has([data-testid="stCaptionContainer"])) {
+        display: none !important;
+    }
     </style>
     """,
     unsafe_allow_html=True,
@@ -2216,8 +2239,17 @@ def _astro_ai_close():
 
 _AI_X_HTML = ('<span class="mkw-x" data-close="chat" title="Close" style="float:right;margin:0 0 4px 8px;'
               'pointer-events:auto;cursor:pointer;color:#94a3b8;font-size:14px;line-height:1;">✕</span>')
-_ai_panel = st.container()
+_ai_panel = st.container(key="astro_ai_panel")
 with _ai_panel:
+    with st.container(key="astro_newchat_btn"):
+        if st.button("", key="astro_new_chat", icon=":material/edit_square:", help="New chat"):
+            st.session_state.astro_ai_history = []
+            st.session_state.astro_ai_answer = None
+            st.session_state.astro_last_question = "Hỏi AI tìm địa điểm & thời điểm chụp ảnh milkyway..."
+            st.session_state.astro_last_processed_query = None
+            st.session_state._ai_rings = []
+            st.session_state._ai_panel = []
+            st.rerun()
     _ai_question = st.chat_input(
         placeholder=_placeholder_text,
         key="astro_ai_input",
@@ -4866,7 +4898,7 @@ with col_left:
                 _own = str(row['📸']).count('⭐')
             stars      = _half_star_html(_own)
             rows_html += (
-                f'<tr style="background:{bg};border-bottom:1px solid rgba(234,88,12,0.18);">'
+                f'<tr style="background:{bg};">'
                 f'<td style="padding:8px 6px;font-weight:700;color:#fb923c;white-space:nowrap;">{time_lbl}</td>'
                 f'<td style="padding:8px 6px;overflow:visible;">{cloud_cell}</td>'
                 f'<td style="padding:8px 6px;color:#fb923c;font-size:13px;white-space:nowrap;">{humid_cell}</td>'
@@ -4876,15 +4908,15 @@ with col_left:
             )
 
         table_html = f"""
-<div style="background:#1a0a00;border:1.5px solid rgba(234,88,12,0.45);border-radius:12px;overflow:hidden;margin-bottom:8px;box-shadow:0 0 20px rgba(234,88,12,0.10);">
-  <table style="width:100%;border-collapse:collapse;font-size:14px;font-family:'Segoe UI',sans-serif;table-layout:fixed;">
+<div class="wx-card">
+  <table class="wx-table">
     <thead>
-      <tr style="background:linear-gradient(90deg,rgba(154,52,18,0.90),rgba(120,40,10,0.75));border-bottom:2px solid rgba(234,88,12,0.55);">
-        <th style="padding:10px 6px;text-align:left;color:#fb923c;font-weight:700;width:14%;">⏰</th>
-        <th style="padding:10px 6px;text-align:left;color:#fb923c;font-weight:700;width:18%;">🌤️</th>
-        <th title="Temperature / Humidity" style="padding:10px 6px;text-align:left;color:#fb923c;font-weight:700;width:21%;white-space:nowrap;">🌡️/💧</th>
-        <th style="padding:10px 6px;text-align:left;color:#fb923c;font-weight:700;width:16%;">💨</th>
-        <th style="padding:10px 4px;text-align:left;color:#fb923c;font-weight:700;width:31%;">📸</th>
+      <tr style="background:linear-gradient(90deg,rgba(154,52,18,0.95),rgba(110,36,10,0.80));">
+        <th style="padding:11px 8px;text-align:left;color:#fdba74;font-weight:700;width:14%;">⏰</th>
+        <th style="padding:11px 8px;text-align:left;color:#fdba74;font-weight:700;width:18%;">🌤️</th>
+        <th title="Temperature / Humidity" style="padding:11px 8px;text-align:left;color:#fdba74;font-weight:700;width:21%;white-space:nowrap;">🌡️/💧</th>
+        <th style="padding:11px 8px;text-align:left;color:#fdba74;font-weight:700;width:16%;">💨</th>
+        <th style="padding:11px 6px;text-align:left;color:#fdba74;font-weight:700;width:31%;">📸</th>
       </tr>
     </thead>
     <tbody>{rows_html}</tbody>
