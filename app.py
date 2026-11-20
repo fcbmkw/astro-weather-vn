@@ -150,13 +150,21 @@ st.markdown("""
         margin-bottom: 12px;
         box-shadow: 0 8px 24px rgba(0,0,0,.35), inset 0 1px 0 rgba(255,255,255,.06);
         position: relative; overflow: hidden;
-        transition: transform .2s ease, border-color .2s ease;
+        transition: border-color .25s ease, box-shadow .25s ease;
     }
     .metric-card::before {
         content: ""; position: absolute; inset: 0 0 auto 0; height: 2px;
-        background: linear-gradient(90deg, transparent, #38bdf8, transparent); opacity: .65;
+        background: linear-gradient(90deg, transparent, #38bdf8 35%, #a78bfa 65%, transparent); opacity: .75;
     }
-    .metric-card:hover { transform: translateY(-2px); border-color: rgba(56,189,248,.45); }
+    .metric-card::after {            /* ánh sáng mờ ở góc trên-phải */
+        content: ""; position: absolute; top: -40px; right: -40px; width: 120px; height: 120px;
+        background: radial-gradient(circle, rgba(56,189,248,.14), transparent 70%);
+        pointer-events: none;
+    }
+    .metric-card:hover { border-color: rgba(56,189,248,.50);
+        box-shadow: 0 8px 24px rgba(0,0,0,.35), 0 0 22px rgba(56,189,248,.14), inset 0 1px 0 rgba(255,255,255,.06); }
+    /* thanh cuộn mảnh, đồng bộ theme tối */
+    * { scrollbar-width: thin; scrollbar-color: #475569 transparent; }
     .wx-card {
         background: linear-gradient(180deg, #1f0e03, #140800);
         border: 1px solid rgba(251,146,60,.38);
@@ -953,7 +961,7 @@ def _half_star_html(v):
     """4 ngôi sao; v bội của 0.5. Đầy = vàng; nửa sao = nửa TRÁI vàng, nửa PHẢI không màu (chỉ viền); rỗng = chỉ viền.
     Hai lớp dùng cùng glyph ★ (viền bằng text-stroke) nên clip 50% khớp đúng giữa ngôi sao."""
     S = "&#9733;"
-    gold  = "color:#facc15;-webkit-text-stroke:1.2px #facc15;"
+    gold  = "color:#facc15;-webkit-text-stroke:1.2px #facc15;text-shadow:0 0 8px rgba(250,204,21,.55);"
     empty = "color:transparent;-webkit-text-stroke:1.2px #cbd5e1;"
     box   = "display:inline-block;margin-right:2px;"
     parts = []
@@ -2202,7 +2210,7 @@ st.markdown(
     .st-key-astro_ai_panel { position: relative; }
     .st-key-astro_ai_panel [data-testid="stElementContainer"]:has(.st-key-astro_newchat_btn) {
         position: absolute !important;
-        top: 6px; right: 44px;
+        top: 6px; right: 42px;
         width: 26px !important; height: 26px !important;
         margin: 0 !important; z-index: 20;
     }
@@ -2213,7 +2221,19 @@ st.markdown(
         color: #94a3b8 !important;
     }
     .st-key-astro_newchat_btn button:hover { color: #38bdf8 !important; background: rgba(56,189,248,.12) !important; }
-    div[data-testid="stChatInput"] textarea { padding-right: 40px !important; }
+    div[data-testid="stChatInput"] textarea { padding-right: 38px !important; }
+    .st-key-astro_newchat_btn button:active,
+    .st-key-astro_newchat_btn button:focus { transform: none !important; box-shadow: none !important; outline: none !important; }
+    .st-key-astro_newchat_btn button { transition: color .2s ease, background .2s ease !important; }
+    div[data-testid="stChatInput"] > div {
+        border-radius: 12px !important;
+        border: 1px solid rgba(148,163,184,.28) !important;
+        transition: border-color .2s ease, box-shadow .2s ease;
+    }
+    div[data-testid="stChatInput"] > div:focus-within {
+        border-color: #38bdf8 !important;
+        box-shadow: 0 0 0 3px rgba(56,189,248,.18) !important;
+    }
     /* Ẩn khung kết quả trống khi chưa có câu trả lời */
     div[class*="st-key-astro_ai_answer_box"]:not(:has([data-testid="stMarkdownContainer"])):not(:has([data-testid="stCaptionContainer"])) {
         display: none !important;
