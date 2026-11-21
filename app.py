@@ -359,10 +359,26 @@ def fetch_location_name(lat, lon):
     except: pass
     return "Unknown Location"
 
+_MOON_TZ_H = 7   # múi giờ địa phương của trang (ICT); date_obj là NGÀY BẮT ĐẦU ĐÊM theo giờ địa phương
+
+@functools.lru_cache(maxsize=512)
+def _moon_state_cached(y, m, d):
+    """(độ sáng %, pha 0..1) của Mặt Trăng tại GIỮA ĐÊM (00:00 giờ địa phương sáng hôm sau) — tính bằng thiên văn (ephem),
+    không dùng công thức chu kỳ trung bình (sai tới ±5%, và bị lệch theo giờ mở trang)."""
+    mid_local = datetime(y, m, d) + timedelta(days=1)
+    utc = mid_local - timedelta(hours=_MOON_TZ_H)
+    t = utc.strftime("%Y/%m/%d %H:%M:%S")
+    mo = ephem.Moon(t)
+    illum = round(float(mo.phase), 1)
+    phase = (float(mo.elong) / (2 * math.pi)) % 1.0       # elong > 0: trăng tròn dần (sáng bên phải ở bán cầu bắc)
+    return illum, phase
+
+def _moon_state(date_obj):
+    return _moon_state_cached(date_obj.year, date_obj.month, date_obj.day)
+
 def get_moon_phase_percent(date_obj):
-    base = datetime(2024, 1, 11)
-    phase = ((date_obj - base).total_seconds() / 86400.0 / 29.53059) % 1.0
-    illum = round((1 - math.cos(phase * 2 * math.pi)) / 2 * 100, 1)
+    """% phần sáng của Mặt Trăng của ĐÊM bắt đầu vào ngày date_obj (đo ở giữa đêm). Chỉ lấy phần NGÀY của date_obj."""
+    illum, phase = _moon_state(date_obj)
     if phase < 0.03 or phase > 0.97: desc = "New Moon 🌑"
     elif phase < 0.22: desc = "Waxing Crescent"
     elif phase < 0.28: desc = "First Quarter"
@@ -377,9 +393,8 @@ def _moon_img_b64(date_obj, size=42, ring=False, halo=False):
     """Ảnh SVG (base64) của pha trăng: phần sáng tính đúng theo % hiển thị (cùng công thức với get_moon_phase_percent);
     sáng bên phải khi trăng đang tròn dần (bán cầu bắc), bên trái khi khuyết dần. Không viền; phần tối chỉ là đĩa rất mờ."""
     import base64 as _b64
-    base = datetime(2024, 1, 11)
-    phase = ((date_obj - base).total_seconds() / 86400.0 / 29.53059) % 1.0
-    k = (1 - math.cos(phase * 2 * math.pi)) / 2           # 0..1 phần được chiếu sáng
+    _il, phase = _moon_state(date_obj)
+    k = _il / 100.0                                        # 0..1 phần được chiếu sáng (cùng nguồn với get_moon_phase_percent)
     rx = 48.0 * abs(1 - 2 * k)                              # bán trục ngắn của đường phân chia sáng/tối
     sweep = 0 if k < 0.5 else 1                             # lưỡi liềm: cong vào trong; gần tròn: cong ra ngoài
     tf = '' if phase < 0.5 else ' transform="translate(100,0) scale(-1,1)"'   # khuyết dần → phần sáng ở bên trái
