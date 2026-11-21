@@ -735,9 +735,11 @@ def _wx_prefetch(coords, workers=8, budget=25):
 
 @st.cache_data(ttl=3600, show_spinner=False)
 def _fetch_weather_raw(lat, lon):
-    pre = _wx_prefetch_store()["data"].pop((lat, lon), None)
-    # Bỏ dữ liệu prefetch cũ (chỉ có ECMWF) còn sót trong cache_resource từ phiên bản trước
-    if pre is not None and any(k.endswith("_icon_global") for k in pre[0]):
+    _st = _wx_prefetch_store()
+    pre = _st["data"].pop((lat, lon), None)
+    # Bỏ dữ liệu prefetch cũ (chỉ có ECMWF) còn sót trong cache_resource từ phiên bản trước, và dữ liệu quá 55 phút
+    if (pre is not None and any(k.endswith("_icon_global") for k in pre[0])
+            and time.time() - _st["at"].get((lat, lon), 0) <= 3300):
         return pre
     return _fetch_weather_raw_impl(lat, lon)
 
@@ -1011,6 +1013,14 @@ def _build_night_data(lat, lon, slots, hourly_data_frozen, weather_source, loc_u
 
     return out_table, out_hours, out_moon, out_sun, out_mw, out_debug, out_srcs
 
+def _display_star_value(verdict):
+    """Số sao HIỂN THỊ của một đêm (trung bình sao theo giờ, khớp bảng giờ) — dùng để XẾP HẠNG khớp số sao người dùng thấy."""
+    v = verdict.get("star_avg")
+    if v is None:
+        _ss = str(verdict.get("stars") or "")
+        v = _ss.count("⭐") + _ss.count("★")
+    return v
+
 def _half_star_html(v):
     """4 ngôi sao; v bội của 0.5. Đầy = vàng; nửa sao = nửa TRÁI vàng, nửa PHẢI không màu (chỉ viền); rỗng = chỉ viền.
     Hai lớp dùng cùng glyph ★ (viền bằng text-stroke) nên clip 50% khớp đúng giữa ngôi sao."""
@@ -1029,10 +1039,50 @@ def _half_star_html(v):
             parts.append(f'<span style="{box}{empty}">{S}</span>')
     return "".join(parts)
 
+@st.cache_data(ttl=3600, show_spinner=False)
+def _wx_backfill_past(lat, lon):
+    """Open-Meteo mặc định chỉ trả dữ liệu từ 00:00 HÔM NAY. Hàm này lấy thêm 2 ngày đã qua
+    để bảng vẫn đủ 18:00→06:00 khi đêm đang xem bắt đầu từ hôm qua."""
+    url = (f"https://api.open-meteo.com/v1/forecast?latitude={lat}&longitude={lon}"
+           f"&hourly={_FIELDS}&models=ecmwf_ifs025,icon_global&wind_speed_unit=ms&timezone=auto"
+           f"&past_days=2&forecast_days=1")
+    try:
+        r = requests.get(url, headers={"User-Agent": "Mozilla/5.0 (AstroMapPro/7.0)"}, timeout=12)
+        if r.status_code == 200:
+            return r.json().get("hourly", {}) or {}
+    except Exception:
+        pass
+    return {}
+
+def _merge_past_hours(hourly, lat, lon):
+    """Ghép giờ quá khứ vào TRƯỚC dữ liệu forecast nếu đêm đang xem bắt đầu sớm hơn giờ đầu tiên của API."""
+    try:
+        if not hourly or not hourly.get("time") or _ep_label != "full":
+            return hourly
+        first = hourly["time"][0]
+        if target_date.strftime("%Y-%m-%dT18:00") >= first:
+            return hourly
+        past = _wx_backfill_past(lat, lon)
+        pt = past.get("time") or []
+        n = sum(1 for t in pt if t < first)
+        if n == 0:
+            return hourly
+        merged = {}
+        for k, v in hourly.items():
+            pv = past.get(k)
+            if isinstance(v, list):
+                merged[k] = (list(pv[:n]) if isinstance(pv, list) and len(pv) >= n else [None] * n) + list(v)
+            else:
+                merged[k] = v
+        return merged
+    except Exception:
+        return hourly
+
 # Chuyển hourly_data sang dạng hashable để cache key hoạt động
+_hourly_night = _merge_past_hours(hourly_data, st.session_state.lat, st.session_state.lon)
 _hourly_frozen = tuple(
     (k, tuple(v) if isinstance(v, list) else v)
-    for k, v in (hourly_data.items() if hourly_data else [])
+    for k, v in (_hourly_night.items() if _hourly_night else [])
 )
 
 # ── PREFETCH TẤT CẢ 7 ĐÊM ngay sau khi có hourly_data ────────────────────────
@@ -1121,6 +1171,7 @@ def _build_night_verdict(table_data, sun_alts=None, moon_illum=None):
     rain_hours = 0
     snow_hours = 0
     cloud_vals = []
+    star_vals = []        # sao theo giờ (0–4) của các slot tối thiên văn → trung bình cả đêm, khớp với bảng giờ
     # streak[i] = True nếu slot i là "giờ tốt" (trong khung tối thiên văn)
     good_flags = []
     for r, sa in zip(table_data, sun_alts):
@@ -1133,6 +1184,9 @@ def _build_night_verdict(table_data, sun_alts=None, moon_illum=None):
         temp_val  = r.get("_temp")
         cloud_pct = int(cloud_str.replace("%","")) if cloud_str.replace("%","").isdigit() else 100
         cloud_vals.append(cloud_pct)
+        _sn = r.get("_stars")
+        if isinstance(_sn, (int, float)):
+            star_vals.append(_sn)
 
         if precip >= 0.3:
             if temp_val is not None and temp_val < 2.0:
@@ -1149,7 +1203,7 @@ def _build_night_verdict(table_data, sun_alts=None, moon_illum=None):
                 "sub": "no astro-dark",
                 "color": "#94a3b8", "border": "rgba(148,163,184,0.55)",
                 "bg": "rgba(10,14,22,0.88)", "anim": "blink-warn",
-                "good_hours": 0, "total": 0}
+                "good_hours": 0, "total": 0, "star_avg": 0}
 
     # ── Tìm cửa sổ liên tiếp dài nhất có điều kiện tốt (longest good streak) ──
     best_streak = 0
@@ -1216,7 +1270,11 @@ def _build_night_verdict(table_data, sun_alts=None, moon_illum=None):
         bg    = "rgba(10,14,22,0.88)"; anim = "blink-warn"
         sub   = f"avg cloud {avg_cloud}%"
 
-    return {"tier": tier, "icon": icon, "stars": stars, "sub": sub,
+    if stars == "✕" or not star_vals:
+        _star_avg = 0 if stars == "✕" else None
+    else:
+        _star_avg = round(sum(star_vals) / len(star_vals) * 2) / 2     # làm tròn 0.5
+    return {"tier": tier, "icon": icon, "stars": stars, "sub": sub, "star_avg": _star_avg,
             "color": color, "border": border, "bg": bg, "anim": anim,
             "good_hours": good_hours, "best_streak": best_streak, "total": total}
 
@@ -1463,10 +1521,10 @@ def _run_best_scan(region="bac", limit=3):
     # Guarantee: at least 1 weekend (Fri/Sat/Sun) slot in top3 if any exists.
     # Strategy: first fill normally from sorted list, then if no weekend found,
     # swap the worst non-weekend slot for the best available weekend candidate.
-    top3 = []
+    _short = []
     seen_coords = []
     for cand in candidates:
-        _, _, _, _, d, day_off, loc_name, loc_coords, verdict, moon_illum = cand
+        _rk, _we, _stk, _gh, d, day_off, loc_name, loc_coords, verdict, moon_illum = cand
         # Dedupe location: skip nếu trong vòng 60km với địa điểm đã chọn
         too_close = any(
             _haversine_km(loc_coords[0], loc_coords[1], sc[0], sc[1]) < 60
@@ -1475,9 +1533,13 @@ def _run_best_scan(region="bac", limit=3):
         if too_close:
             continue
         seen_coords.append(loc_coords)
-        top3.append((d, day_off, loc_name, loc_coords, verdict, moon_illum))
-        if len(top3) >= limit:
+        _short.append((_display_star_value(verdict), _rk, _we, _stk, _gh,
+                       (d, day_off, loc_name, loc_coords, verdict, moon_illum)))
+        if len(_short) >= 12:
             break
+    # Xếp theo số sao hiển thị → tier → cuối tuần → streak → giờ tốt
+    _short.sort(key=lambda x: x[:5], reverse=True)
+    top3 = [x[5] for x in _short[:limit]]
 
     # Guarantee at least 1 weekend in top3
     if top3:
@@ -1564,8 +1626,9 @@ def _run_tonight_scan(region="bac", limit=3):
 
     candidates.sort(key=lambda x: (x[0], x[1], x[2]), reverse=True)
 
-    # Pick top 3, dedupe by location <60km
-    top3 = []
+    # Shortlist 12 địa điểm (dedupe <60km) theo tier/streak, rồi XẾP LẠI theo số sao hiển thị
+    # để thứ hạng #1/#2/#3 khớp với số sao người dùng nhìn thấy.
+    _short = []
     seen_coords = []
     for cand in candidates:
         rank, streak, good_hours, loc_name, loc_coords, verdict, moon_illum = cand
@@ -1576,9 +1639,12 @@ def _run_tonight_scan(region="bac", limit=3):
         if too_close:
             continue
         seen_coords.append(loc_coords)
-        top3.append((d, day_off, loc_name, loc_coords, verdict, moon_illum, False))
-        if len(top3) >= limit:
+        _short.append((_display_star_value(verdict), rank, streak, good_hours,
+                       (d, day_off, loc_name, loc_coords, verdict, moon_illum, False)))
+        if len(_short) >= 12:
             break
+    _short.sort(key=lambda x: x[:4], reverse=True)
+    top3 = [x[4] for x in _short[:limit]]
 
     if not top3:
         return {"_fallback": True, "_fallback_label": _summarize_fallback_tiers(_fallback_tiers)} if _fallback_tiers else None
@@ -1622,6 +1688,7 @@ def _serialize_scan_result(result):
             "lon": loc_coords[1],
             "sky_tier": verdict.get("tier"),          # PERFECT NIGHT / GOOD STARRY NIGHT / ...
             "stars": verdict.get("stars"),
+            "star_avg": verdict.get("star_avg"),
             "detail": verdict.get("sub"),              # vd "avg cloud 12%, 6h clear"
             "clear_hours": verdict.get("good_hours"),
             "moon_illumination_pct": round(moon_illum, 1) if moon_illum is not None else None,
@@ -1770,6 +1837,7 @@ def tool_check_location_tonight(location_name: str) -> dict:
         "region": region,
         "sky_tier": verdict.get("tier"),
         "stars": verdict.get("stars"),
+        "star_avg": verdict.get("star_avg"),
         "detail": verdict.get("sub"),
         "clear_hours": verdict.get("good_hours"),
         "moon_illumination_pct": round(result["moon_illum"], 1) if result["moon_illum"] is not None else None,
@@ -1796,8 +1864,14 @@ def _ai_panel_row(c):
             bortle = calculate_accurate_bortle(c["lat"], c["lon"])[0]
         except Exception:
             bortle = None
+    # sao: trung bình sao theo giờ cả đêm (khớp bảng giờ); thiếu thì đếm ký tự sao (★ hoặc ⭐) của verdict
+    _sv = c.get("star_avg")
+    if _sv is None and c.get("stars"):
+        _ss = str(c.get("stars"))
+        _sv = _ss.count("⭐") + _ss.count("★")
     return {"name": short.strip(), "pref": pref.strip(),
             "date": f"{d.month}/{d.day} {_EN_WD_AI[d.weekday()]}" if d else "",
+            "stars_val": _sv,
             "tier": c.get("sky_tier"), "stars": c.get("stars") or "",
             "detail": c.get("detail") or "", "moon": c.get("moon_illumination_pct"),
             "wk": bool(c.get("is_weekend")), "bortle": bortle}
@@ -1806,6 +1880,7 @@ def _ai_mentioned_cands(answer_text, all_cands, max_n=5):
     """Các địa điểm AI THỰC SỰ nêu tên trong câu trả lời, lấy từ kết quả của MỌI lần gọi tool trong lượt này
     (không chỉ lần gọi cuối), theo thứ tự xuất hiện trong văn bản. Dùng để vẽ vòng tròn/bảng AI picks/ghim map khớp với lời AI."""
     txt = re.sub(r"\s+", " ", str(answer_text or "")).lower()
+    txt_sq = re.sub(r"[^a-z0-9]", "", txt)          # bản "dán liền" để khớp tên viết khác dấu cách/gạch nối/dấu nháy
     found = {}
     for c in all_cands:
         if "lat" not in c:
@@ -1819,6 +1894,11 @@ def _ai_mentioned_cands(answer_text, all_cands, max_n=5):
             m = re.search(r"(?<![a-z0-9])" + re.escape(k) + r"(?![a-z0-9])", txt)
             if m:
                 pos.append(m.start())
+        if not pos:
+            for k in {short.lower(), latin.lower()}:
+                ksq = re.sub(r"[^a-z0-9]", "", k)
+                if len(ksq) >= 6 and ksq in txt_sq:
+                    pos.append(txt_sq.find(ksq))
         if not pos:
             continue
         found[(round(c["lat"], 3), round(c["lon"], 3))] = (min(pos), c)   # cùng địa điểm gọi nhiều lần → lấy kết quả mới nhất
@@ -1940,7 +2020,14 @@ def ask_astro_ai(user_question: str):
     # Ưu tiên đúng các địa điểm AI nêu tên trong câu trả lời (từ mọi lần gọi tool); không khớp được tên nào → như cũ
     _named = _ai_mentioned_cands(answer_text, all_cands)
     if _named:
-        _shown = _named
+        # Gộp với danh sách tool trả về: AI nêu tên hơi khác (gạch nối, rút gọn...) thì vẫn không làm rớt địa điểm khỏi bảng.
+        _key = lambda c: (round(c["lat"], 3), round(c["lon"], 3))
+        _shown_keys = {_key(c) for c in _shown}
+        if _shown and all(_key(c) in _shown_keys for c in _named):
+            pass                                  # mọi địa điểm AI nêu đều thuộc kết quả tool → giữ nguyên thứ hạng của tool
+        else:
+            _have = {_key(c) for c in _named}
+            _shown = (_named + [c for c in _shown if _key(c) not in _have])[:5]
     st.session_state._ai_rings = [[c.get("matched_name") or c.get("location_name") or "", c["lat"], c["lon"]]
                                   for c in _shown]
     st.session_state._ai_panel = [_ai_panel_row(c) for c in _shown]
@@ -2273,7 +2360,24 @@ st.markdown(
     .nc-btn:hover { color: #38bdf8; background: rgba(56,189,248,.14); }
     .nc-btn:active { transform: none; }
     .nc-btn svg { width: 16px; height: 16px; fill: currentColor; pointer-events: none; }
-    div[data-testid="stChatInput"] textarea { padding-right: 8px !important; }
+    div[data-testid="stChatInput"] textarea {
+        padding-right: 8px !important;
+        color: #f8fafc !important; -webkit-text-fill-color: #f8fafc !important; caret-color: #f8fafc !important;
+    }
+    div[data-testid="stChatInput"] textarea::placeholder { color: #94a3b8 !important; -webkit-text-fill-color: #94a3b8 !important; opacity: 1 !important; }
+    div[class*="st-key-astro_ai_answer_box"] p,
+    div[class*="st-key-astro_ai_answer_box"] li,
+    div[class*="st-key-astro_ai_answer_box"] strong,
+    div[class*="st-key-astro_ai_answer_box"] em,
+    div[class*="st-key-astro_ai_answer_box"] h1,
+    div[class*="st-key-astro_ai_answer_box"] h2,
+    div[class*="st-key-astro_ai_answer_box"] h3,
+    div[class*="st-key-astro_ai_answer_box"] h4,
+    div[class*="st-key-astro_ai_answer_box"] span:not(.mkw-x),
+    div[class*="st-key-astro_ai_answer_box"] [data-testid="stMarkdownContainer"],
+    div[class*="st-key-astro_ai_answer_box"] [data-testid="stCaptionContainer"] { color: #f8fafc !important; }
+    div[class*="st-key-astro_ai_answer_box"] a { color: #38bdf8 !important; }
+    div[class*="st-key-astro_ai_answer_box"] code { color: #fde68a !important; background: rgba(148,163,184,.16) !important; }
     div[data-testid="stChatInput"] > div {
         border-radius: 12px !important;
         border: 1px solid rgba(148,163,184,.28) !important;
@@ -4020,7 +4124,8 @@ if _ai_rows:
             f'text-overflow:ellipsis;white-space:nowrap;">{_aih.escape(_r.get("name", ""))}'
             f'<span style="color:#64748b;font-weight:500;font-size:10px;"> {_aih.escape(_r.get("pref", ""))}</span></span>'
             f'<span style="color:{"#fcd34d" if _r.get("wk") else "#94a3b8"};font-size:11px;flex-shrink:0;">{_aih.escape(_r.get("date", ""))}</span>'
-            f'<span style="color:#fbbf24;font-size:12px;flex-shrink:0;">{_aih.escape(str(_r.get("stars", "")))}</span>'
+            f'<span style="color:#fbbf24;font-size:{15 if _r.get("stars_val") is not None else 12}px;flex-shrink:0;">'
+            f'{_half_star_html(_r["stars_val"]) if _r.get("stars_val") is not None else _aih.escape(str(_r.get("stars", "")))}</span>'
             f'</div>'
             f'<div style="color:#94a3b8;font-size:10px;margin:2px 0 0 23px;line-height:1.35;">{" · ".join(_bits)}</div>'
             f'</div>')
@@ -5022,6 +5127,12 @@ with col_left:
     <tbody>{rows_html}</tbody>
   </table>
 </div>"""
+        if len(weather_table_data) < 13:
+            st.markdown('<div style="background:#422006;border:1px solid #f97316;border-radius:8px;'
+                        'padding:6px 14px;margin-bottom:8px;font-size:13px;color:#fed7aa;">'
+                        f'⚠️ Some hours of this night are missing ({len(weather_table_data)}/13). '
+                        'Please press Retry or reload the page.</div>',
+                        unsafe_allow_html=True)
         st.markdown(table_html, unsafe_allow_html=True)
     else:
         # Hiển thị nguyên nhân thực tế thay vì hardcode "502 Bad Gateway"
