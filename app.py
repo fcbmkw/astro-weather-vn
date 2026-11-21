@@ -183,6 +183,22 @@ st.markdown("""
     .wx-card .wx-table tbody tr:last-child td { border-bottom: none !important; }
     .wx-card .wx-table tbody tr { transition: background .15s ease; }
     .wx-card .wx-table tbody tr:hover { background: rgba(251,146,60,.18) !important; }
+    /* ── Điện thoại: thu gọn padding/cỡ chữ để 5 cột (nhất là 4 sao) vừa khít, sao không sát mép phải ── */
+    @media (max-width: 520px) {
+        .wx-card table.wx-table { font-size: 12.5px; }
+        .wx-card .wx-table th, .wx-card .wx-table td { padding-left: 4px !important; padding-right: 4px !important; }
+        .wx-card .wx-table th:first-child, .wx-card .wx-table td:first-child { padding-left: 8px !important; }
+        .wx-card .wx-table .wx-ci { font-size: 16px !important; }
+        .wx-card .wx-table .wx-cp { font-size: 13px !important; margin-left: 1px !important; }
+        .wx-card .wx-table .wx-th { font-size: 12px !important; }
+        .wx-card .wx-table .wx-stars { font-size: 17px !important; padding-right: 8px !important; }
+        .wx-card .wx-table .wx-stars span { margin-right: 1px !important; }
+    }
+    /* Chữ gợi ý chatbox: nhỏ hơn trên điện thoại để không xuống dòng */
+    div[data-testid="stChatInput"] textarea::placeholder { font-size: 12px !important; }
+    @media (max-width: 520px) {
+        div[data-testid="stChatInput"] textarea::placeholder { font-size: clamp(8.5px, 2.45vw, 10.5px) !important; letter-spacing: -0.1px; }
+    }
     .source-card {
         background-color: #1e293b;
         border-radius: 10px;
@@ -2399,7 +2415,7 @@ st.markdown(
 # --- KHUNG CHAT: input trên, khung kết quả bên dưới ---
 _placeholder_text = st.session_state.get(
     "astro_last_question",
-    "Hỏi AI tìm địa điểm & thời điểm chụp ảnh milkyway...",
+    "Hỏi AI địa điểm & thời điểm chụp milkyway...",
 )
 
 
@@ -2418,7 +2434,7 @@ with _ai_panel:
         if st.button("", key="astro_new_chat", icon=":material/edit_square:", help="New chat"):
             st.session_state.astro_ai_history = []
             st.session_state.astro_ai_answer = None
-            st.session_state.astro_last_question = "Hỏi AI tìm địa điểm & thời điểm chụp ảnh milkyway..."
+            st.session_state.astro_last_question = "Hỏi AI địa điểm & thời điểm chụp milkyway..."
             st.session_state.astro_last_processed_query = None
             st.session_state._ai_rings = []
             st.session_state._ai_panel = []
@@ -5048,7 +5064,7 @@ with col_left:
     # Table — custom styled HTML card
     if weather_table_data:
         # Hiện badge nếu đang dùng fallback endpoint
-        def _cloud_icon_cell(pct_str, precip_val=0.0, temp_val=None, spread=None):
+        def _cloud_icon_cell(pct_str, precip_val=0.0, temp_val=None, spread=None, popup_up=False):
             pct = int(pct_str.replace('%',''))
             if precip_val is not None and precip_val > 0.5:
                 if temp_val is not None and temp_val < 1.0:
@@ -5065,13 +5081,15 @@ with col_left:
                 icon, col = '\U0001f325\ufe0f', '#94a3b8'
             else:
                 icon, col = '\u2601\ufe0f', '#64748b'
+            # Popup cảnh báo: hàng cuối bảng → mở LÊN TRÊN (bên dưới sẽ bị khung bảng overflow:hidden che mất)
+            _pop_pos = "bottom:100%;margin-bottom:2px;" if popup_up else "top:100%;margin-top:2px;"
             return (f'<div style="display:flex;align-items:center;gap:3px;white-space:nowrap;">'
-                    f'<span style="font-size:18px;line-height:1;">{icon}</span>'
-                    f'<span style="font-size:14px;color:{col};font-weight:700;margin-left:2px;">{pct_str}</span>'
+                    f'<span class="wx-ci" style="font-size:18px;line-height:1;">{icon}</span>'
+                    f'<span class="wx-cp" style="font-size:14px;color:{col};font-weight:700;margin-left:2px;">{pct_str}</span>'
                     + (f'<details name="spreadwarn" style="display:inline-block;position:relative;">'
                        f'<summary '
                        f'style="display:inline-block;list-style:none;cursor:pointer;font-size:13px;color:#f59e0b;padding:0 2px;">\u26a0</summary>'
-                       f'<div style="position:absolute;z-index:30;left:0;top:100%;margin-top:2px;background:#0f172a;'
+                       f'<div style="position:absolute;z-index:30;left:0;{_pop_pos}background:#0f172a;'
                        f'border:1px solid #f59e0b;border-radius:6px;padding:4px 8px;font-size:11px;color:#fde68a;'
                        f'font-weight:600;white-space:nowrap;box-shadow:0 2px 8px rgba(0,0,0,0.6);">'
                        f'Chênh lệch ECMWF – ICON: {int(round(spread))}%</div></details>'
@@ -5089,7 +5107,8 @@ with col_left:
         for i, row in enumerate(weather_table_data):
             bg = 'rgba(234,88,12,0.10)' if i % 2 == 0 else 'rgba(194,65,12,0.06)'
             time_lbl = row['⏰']
-            cloud_cell = _cloud_icon_cell(row['☁️'], row.get('_precip', 0.0), row.get('_temp'), row.get('_spread'))
+            cloud_cell = _cloud_icon_cell(row['☁️'], row.get('_precip', 0.0), row.get('_temp'), row.get('_spread'),
+                                          popup_up=(i >= len(weather_table_data) - 3))
             humid_val  = row['💧']
             try:
                 _tt = f"{int(round(float(row.get('_temp'))))}°"
@@ -5106,9 +5125,9 @@ with col_left:
                 f'<tr style="background:{bg};">'
                 f'<td style="padding:8px 6px;font-weight:700;color:#fb923c;white-space:nowrap;">{time_lbl}</td>'
                 f'<td style="padding:8px 6px;overflow:visible;">{cloud_cell}</td>'
-                f'<td style="padding:8px 6px;color:#fb923c;font-size:13px;white-space:nowrap;">{humid_cell}</td>'
+                f'<td class="wx-th" style="padding:8px 6px;color:#fb923c;font-size:13px;white-space:nowrap;">{humid_cell}</td>'
                 f'<td style="padding:8px 6px;color:#fb923c;white-space:nowrap;">{wind_cell}</td>'
-                f'<td style="padding:8px 4px;font-size:22px;line-height:1;letter-spacing:0;white-space:nowrap;">{stars}</td>'
+                f'<td class="wx-stars" style="padding:8px 4px;font-size:22px;line-height:1;letter-spacing:0;white-space:nowrap;">{stars}</td>'
                 f'</tr>'
             )
 
@@ -5118,9 +5137,9 @@ with col_left:
     <thead>
       <tr style="background:linear-gradient(90deg,rgba(154,52,18,0.95),rgba(110,36,10,0.80));">
         <th style="padding:11px 8px;text-align:left;color:#fdba74;font-weight:700;width:13%;">⏰</th>
-        <th style="padding:11px 8px;text-align:left;color:#fdba74;font-weight:700;width:21%;">🌤️</th>
-        <th title="Temperature / Humidity" style="padding:11px 8px;text-align:left;color:#fdba74;font-weight:700;width:21%;white-space:nowrap;">🌡️/💧</th>
-        <th style="padding:11px 8px;text-align:left;color:#fdba74;font-weight:700;width:19%;">💨</th>
+        <th style="padding:11px 8px;text-align:left;color:#fdba74;font-weight:700;width:22%;">🌤️</th>
+        <th title="Temperature / Humidity" style="padding:11px 8px;text-align:left;color:#fdba74;font-weight:700;width:19%;white-space:nowrap;">🌡️/💧</th>
+        <th style="padding:11px 8px;text-align:left;color:#fdba74;font-weight:700;width:20%;">💨</th>
         <th style="padding:11px 6px;text-align:left;color:#fdba74;font-weight:700;width:26%;">📸</th>
       </tr>
     </thead>
