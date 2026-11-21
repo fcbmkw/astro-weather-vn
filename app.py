@@ -4426,7 +4426,8 @@ _mkw_comp.html("""<script>
 }catch(err){ console.log('[mkw] bridge error', err); }})();
 (function(){try{
   var P = window.parent, D = P.document;
-  if (P.__ncObs) { P.__ncObs.disconnect(); }
+  try { if (P.__ncObs) { P.__ncObs.disconnect(); } } catch (e0) {}
+  var TOKEN = String(Date.now()) + '-' + Math.random().toString(36).slice(2);
   var ICON = '<svg viewBox="0 0 24 24"><path d="M5 3h8.5l-2 2H5v14h14v-6.5l2-2V19a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2zm14.6.4 1.9 1.9a1 1 0 0 1 0 1.4L12 15.2 9 16l.8-3L18.2 3.4a1 1 0 0 1 1.4 0z"/></svg>';
   function hideOrig() {
     var kb = D.querySelector('.st-key-astro_newchat_btn');
@@ -4438,11 +4439,17 @@ _mkw_comp.html("""<script>
   function ensure() {
     hideOrig();
     var ci = D.querySelector('[data-testid="stChatInput"]');
-    if (!ci || ci.querySelector('.nc-btn')) return;
+    if (!ci) return;
+    // Iframe chứa script này có thể bị Streamlit dựng lại sau mỗi lần hỏi AI: nút cũ vẫn nằm trong trang nhưng handler của nó
+    // thuộc iframe đã huỷ nên bấm không có tác dụng. Mỗi bản script có TOKEN riêng → thấy nút của bản cũ thì xoá và tạo lại.
+    var ex = ci.querySelector('.nc-btn');
+    if (ex && ex.getAttribute('data-nc-token') === TOKEN) return;
+    if (ex) ex.remove();
     var send = ci.querySelector('button');
     if (!send || !send.parentNode) return;
     var b = D.createElement('button');
     b.type = 'button'; b.className = 'nc-btn'; b.title = 'New chat'; b.innerHTML = ICON;
+    b.setAttribute('data-nc-token', TOKEN);
     b.addEventListener('click', function(e) {
       e.preventDefault(); e.stopPropagation();
       var t = D.querySelector('.st-key-astro_newchat_btn button');
