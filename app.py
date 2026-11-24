@@ -571,6 +571,53 @@ def calculate_accurate_bortle(lat, lon):
     _bc_old, _sq = _calculate_bortle_fallback(lat, lon)
     return _sqm_to_bortle_half(_sq), _sq     # luôn quy đổi Bortle từ SQM bằng cùng một bảng
 
+# ── Override từ lightpollutionmap.info "Sky Brightness 2025" cho các địa điểm trong LOCATION_DATABASE ──
+# Dán đoạn này NGAY SAU hàm calculate_accurate_bortle(...) hiện có (trước _calculate_bortle_fallback).
+# CSV tạo bằng export_lpm2025_template.py, đặt cùng thư mục với app. Dòng nào chưa điền sqm thì bỏ qua
+# → điểm đó (và mọi điểm ngẫu nhiên khác trên bản đồ) vẫn dùng World Atlas 2015 như cũ.
+_LPM2025_CSV = "lpm_2025_overrides_vn.csv"     # app_vn: "lpm_2025_overrides_vn.csv"
+_LPM2025_TOL = 0.0025                          # ~150 m quanh toạ độ địa điểm
+
+@functools.lru_cache(maxsize=1)
+def _lpm2025_table():
+    import csv
+    here = os.path.dirname(os.path.abspath(__file__)) if "__file__" in globals() else os.getcwd()
+    for d in (here, os.getcwd()):
+        p = os.path.join(d, _LPM2025_CSV)
+        if not os.path.exists(p):
+            continue
+        rows = []
+        try:
+            with open(p, encoding="utf-8-sig", newline="") as f:
+                for r in csv.DictReader(f):
+                    try:
+                        s = float((r.get("sqm") or "").strip().replace(",", "."))
+                        rows.append((float(r["lat"]), float(r["lon"]), s))
+                    except Exception:
+                        continue          # dòng trống / sai định dạng → bỏ qua
+        except Exception:
+            return ()
+        return tuple(rows)
+    return ()
+
+def _lpm2025_lookup(lat, lon):
+    best = None
+    for la, lo, s in _lpm2025_table():
+        if abs(la - lat) <= _LPM2025_TOL and abs(lo - lon) <= _LPM2025_TOL:
+            d = (la - lat) ** 2 + (lo - lon) ** 2
+            if best is None or d < best[0]:
+                best = (d, s)
+    return None if best is None else best[1]
+
+_calculate_accurate_bortle_atlas = calculate_accurate_bortle   # bản World Atlas 2015 sẵn có
+
+def calculate_accurate_bortle(lat, lon):
+    _o = _lpm2025_lookup(float(lat), float(lon))
+    if _o is not None:
+        _o = max(16.0, min(22.1, _o))
+        return _sqm_to_bortle_half(_o), _o
+    return _calculate_accurate_bortle_atlas(lat, lon)
+
 def _calculate_bortle_fallback(lat, lon):
     """Estimate Bortle class and SQM (mag/arcsec2) from coordinates.
 
