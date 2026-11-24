@@ -560,7 +560,7 @@ def _sqm_to_bortle_half(sqm_est):
     n = _sqm_to_bortle(sqm_est)
     dark_edge, bright_edge = _lows[n - 1], _lows[n]
     x = n + (dark_edge - sqm_est) / (dark_edge - bright_edge)
-    return max(1.0, min(9.0, round(x * 2) / 2))
+    return max(1.0, min(9.0, round(x, 1)))
 
 def calculate_accurate_bortle(lat, lon):
     """Ưu tiên số liệu thật từ World Atlas 2015; không có thì dùng mô hình ước tính cũ."""
