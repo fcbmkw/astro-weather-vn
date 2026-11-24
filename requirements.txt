@@ -8,3 +8,5 @@ ephem
 jinja2
 plotly
 google-genai
+rasterio
+numpy
