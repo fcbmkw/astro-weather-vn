@@ -17,10 +17,10 @@ import os
 import functools
 from google import genai
 from google.genai import types as genai_types
- 
+
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "")
 _astro_ai_client = genai.Client(api_key=GEMINI_API_KEY)
- 
+
 # Cùng danh sách model fallback như app_ai.py — sửa ở đây nếu bạn đổi model.
 ASTRO_AI_MODEL_CANDIDATES = [
     "gemini-3.6-flash",
@@ -427,7 +427,6 @@ def _moon_img_b64(date_obj, size=42, ring=False, halo=False):
            + body + '</svg>')
     return _b64.b64encode(svg.encode("utf-8")).decode("ascii")
 
-
 def _moon_icon(desc):
     """Tên pha trăng (đầu chuỗi mô tả) → emoji pha trăng."""
     d = str(desc)
@@ -550,7 +549,7 @@ def _sqm_to_bortle(sqm_est):
     return 9
 
 def _sqm_to_bortle_half(sqm_est):
-    """Bortle thập phân, bước 0.5 (1.0 … 9.0), nội suy tuyến tính theo SQM trong từng cấp.
+    """Bortle thập phân, bước 0.1 (1.0 … 9.0), nội suy tuyến tính theo SQM trong từng cấp.
     Mốc tối của cấp n = n.0, mốc sáng = (n+1).0. Làm tròn tới 0.5 gần nhất."""
     if sqm_est >= 21.99:
         return 1.0
@@ -575,8 +574,8 @@ def calculate_accurate_bortle(lat, lon):
 # Dán đoạn này NGAY SAU hàm calculate_accurate_bortle(...) hiện có (trước _calculate_bortle_fallback).
 # CSV tạo bằng export_lpm2025_template.py, đặt cùng thư mục với app. Dòng nào chưa điền sqm thì bỏ qua
 # → điểm đó (và mọi điểm ngẫu nhiên khác trên bản đồ) vẫn dùng World Atlas 2015 như cũ.
-_LPM2025_CSV = "lpm_2025_overrides_vn.csv"     # app_vn: "lpm_2025_overrides_vn.csv"
-_LPM2025_TOL = 0.0025                          # ~150 m quanh toạ độ địa điểm
+_LPM2025_CSV = "lpm_2025_overrides_vn.csv"
+_LPM2025_TOL = 0.0015                          # ~150 m quanh toạ độ địa điểm
 
 @functools.lru_cache(maxsize=1)
 def _lpm2025_table():
@@ -843,7 +842,7 @@ def _calculate_bortle_fallback(lat, lon):
 _FIELDS = "cloud_cover,cloud_cover_low,cloud_cover_mid,cloud_cover_high,relative_humidity_2m,wind_speed_10m,temperature_2m,precipitation"
 _ENDPOINTS = [
     # (label, url_suffix)
-    ("full",    f"&hourly={_FIELDS}&models=ecmwf_ifs025,icon_global&wind_speed_unit=ms&timezone=auto"),
+    ("full",    f"&hourly={_FIELDS}&models=ecmwf_ifs025,icon_global&wind_speed_unit=ms&timezone=auto&forecast_days=8"),
 ]
 
 @st.cache_resource
@@ -885,7 +884,7 @@ def _fetch_weather_raw(lat, lon):
     _st = _wx_prefetch_store()
     pre = _st["data"].pop((lat, lon), None)
     # Bỏ dữ liệu prefetch cũ (chỉ có ECMWF) còn sót trong cache_resource từ phiên bản trước, và dữ liệu quá 55 phút
-    if (pre is not None and any(k.endswith("_icon_global") for k in pre[0])
+    if (pre is not None and len(pre[0].get("time", [])) >= 190 and any(k.endswith("_icon_global") for k in pre[0])
             and time.time() - _st["at"].get((lat, lon), 0) <= 3300):
         return pre
     return _fetch_weather_raw_impl(lat, lon)
@@ -1043,6 +1042,158 @@ date_options = [
     f"{_en_date(_night_base_ict+timedelta(days=i), 'eve')} → {_en_date(_night_base_ict+timedelta(days=i+1), 'morn')}"
     for i in range(7)
 ]
+
+# ── 7 nút chọn ngày: nhãn + màu chữ (T2–T6 trắng, T7 vàng, CN & ngày lễ đỏ) ────────
+from datetime import date as _dt_date
+
+# --- Âm lịch (thuật toán Hồ Ngọc Đức, múi giờ +7) — dùng cho Tết Nguyên đán & Giỗ Tổ Hùng Vương ---
+def _vn_jd(d):
+    return d.toordinal() + 1721425
+
+def _vn_new_moon(k):
+    T = k / 1236.85; T2 = T * T; T3 = T2 * T; dr = math.pi / 180
+    jd1 = 2415020.75933 + 29.53058868 * k + 0.0001178 * T2 - 0.000000155 * T3
+    jd1 += 0.00033 * math.sin((166.56 + 132.87 * T - 0.009173 * T2) * dr)
+    M = 359.2242 + 29.10535608 * k - 0.0000333 * T2 - 0.00000347 * T3
+    Mpr = 306.0253 + 385.81691806 * k + 0.0107306 * T2 + 0.00001236 * T3
+    F = 21.2964 + 390.67050646 * k - 0.0016528 * T2 - 0.00000239 * T3
+    c1 = (0.1734 - 0.000393 * T) * math.sin(M * dr) + 0.0021 * math.sin(2 * dr * M)
+    c1 -= 0.4068 * math.sin(Mpr * dr) - 0.0161 * math.sin(dr * 2 * Mpr)
+    c1 -= 0.0004 * math.sin(dr * 3 * Mpr)
+    c1 += 0.0104 * math.sin(dr * 2 * F) - 0.0051 * math.sin(dr * (M + Mpr))
+    c1 -= 0.0074 * math.sin(dr * (M - Mpr)) - 0.0004 * math.sin(dr * (2 * F + M))
+    c1 -= 0.0004 * math.sin(dr * (2 * F - M)) + 0.0006 * math.sin(dr * (2 * F + Mpr))
+    c1 += 0.0010 * math.sin(dr * (2 * F - Mpr)) + 0.0005 * math.sin(dr * (2 * Mpr + M))
+    dt = (0.001 + 0.000839 * T + 0.0002261 * T2 - 0.00000845 * T3 - 0.000000081 * T * T3) if T < -11 \
+        else (-0.000278 + 0.000265 * T + 0.000262 * T2)
+    return jd1 + c1 - dt
+
+def _vn_sun_long(jdn, tz=7):
+    T = (jdn - 0.5 - tz / 24.0 - 2451545.0) / 36525; T2 = T * T; dr = math.pi / 180
+    M = 357.52910 + 35999.05030 * T - 0.0001559 * T2 - 0.00000048 * T * T2
+    L0 = 280.46645 + 36000.76983 * T + 0.0003032 * T2
+    DL = (1.914600 - 0.004817 * T - 0.000014 * T2) * math.sin(dr * M)
+    DL += (0.019993 - 0.000101 * T) * math.sin(dr * 2 * M) + 0.000290 * math.sin(dr * 3 * M)
+    L = (L0 + DL) * dr
+    L -= math.pi * 2 * int(L / (math.pi * 2))
+    return int(L / math.pi * 6)
+
+def _vn_nm_day(k, tz=7):
+    return int(_vn_new_moon(k) + 0.5 + tz / 24.0)
+
+def _vn_month11(year, tz=7):
+    off = _vn_jd(_dt_date(year, 12, 31)) - 2415021
+    k = int(off / 29.530588853)
+    nm = _vn_nm_day(k, tz)
+    if _vn_sun_long(nm, tz) >= 9:
+        nm = _vn_nm_day(k - 1, tz)
+    return nm
+
+def _vn_leap_offset(a11, tz=7):
+    k = int((a11 - 2415021.076998695) / 29.530588853 + 0.5)
+    i = 1
+    arc = _vn_sun_long(_vn_nm_day(k + i, tz), tz)
+    while True:
+        last = arc
+        i += 1
+        arc = _vn_sun_long(_vn_nm_day(k + i, tz), tz)
+        if arc == last or i >= 14:
+            break
+    return i - 1
+
+def _vn_solar_to_lunar(d, tz=7):
+    """(ngày âm, tháng âm, năm âm, nhuận) của ngày dương d."""
+    day_no = _vn_jd(d)
+    k = int((day_no - 2415021.076998695) / 29.530588853)
+    month_start = _vn_nm_day(k + 1, tz)
+    if month_start > day_no:
+        month_start = _vn_nm_day(k, tz)
+    a11 = _vn_month11(d.year, tz)
+    b11 = a11
+    if a11 >= month_start:
+        lunar_year = d.year
+        a11 = _vn_month11(d.year - 1, tz)
+    else:
+        lunar_year = d.year + 1
+        b11 = _vn_month11(d.year + 1, tz)
+    lunar_day = day_no - month_start + 1
+    diff = int((month_start - a11) / 29)
+    leap = 0
+    lunar_month = diff + 11
+    if b11 - a11 > 365:
+        leap_diff = _vn_leap_offset(a11, tz)
+        if diff >= leap_diff:
+            lunar_month = diff + 10
+            if diff == leap_diff:
+                leap = 1
+    if lunar_month > 12:
+        lunar_month -= 12
+    if lunar_month >= 11 and diff < 4:
+        lunar_year -= 1
+    return lunar_day, lunar_month, lunar_year, leap
+
+def _vn_find_lunar(year, lday, lmonth, start, end):
+    d = start
+    while d <= end:
+        ld, lm, _ly, lleap = _vn_solar_to_lunar(d)
+        if ld == lday and lm == lmonth and not lleap:
+            return d
+        d += timedelta(days=1)
+    return None
+
+# Lịch nghỉ do Chính phủ/Bộ Nội vụ công bố (cần cập nhật hằng năm). Năm chưa có trong bảng → dùng quy định tối thiểu.
+_VN_TET_OFFICIAL = {2027: (_dt_date(2027, 2, 4), _dt_date(2027, 2, 10))}                # 28 Chạp → mùng 5
+_VN_QUOCKHANH    = {2026: (_dt_date(2026, 9, 1), _dt_date(2026, 9, 2)),
+                    2027: (_dt_date(2027, 9, 2), _dt_date(2027, 9, 3))}
+
+@functools.lru_cache(maxsize=16)
+def _vn_holidays(year):
+    hol = set()
+    singles = [_dt_date(year, 1, 1), _dt_date(year, 4, 30), _dt_date(year, 5, 1)]
+    if year >= 2026:
+        singles.append(_dt_date(year, 11, 24))                                           # Ngày Văn hóa Việt Nam
+    gio_to = _vn_find_lunar(year, 10, 3, _dt_date(year, 3, 15), _dt_date(year, 5, 15))  # Giỗ Tổ 10/3 âm lịch
+    if gio_to:
+        singles.append(gio_to)
+    if year not in _VN_QUOCKHANH:
+        singles.append(_dt_date(year, 9, 2))
+    for d in singles:                                                                    # trùng T7/CN → nghỉ bù vào ngày làm việc kế tiếp
+        hol.add(d)
+        if d.weekday() >= 5:
+            x = d + timedelta(days=(7 - d.weekday()))
+            while x in hol:
+                x += timedelta(days=1)
+            hol.add(x)
+    if year in _VN_QUOCKHANH:
+        hol.update(_VN_QUOCKHANH[year])
+    tet = _vn_find_lunar(year, 1, 1, _dt_date(year, 1, 18), _dt_date(year, 2, 25))      # mùng 1 Tết
+    if year in _VN_TET_OFFICIAL:
+        a, b = _VN_TET_OFFICIAL[year]
+        d = a
+        while d <= b:
+            hol.add(d); d += timedelta(days=1)
+    elif tet:
+        for k in range(-1, 4):                                                           # 30/29 Chạp + mùng 1–4 (tối thiểu theo Bộ luật Lao động)
+            hol.add(tet + timedelta(days=k))
+    return frozenset(hol)
+
+_DAYCOL_NORMAL, _DAYCOL_SAT, _DAYCOL_RED = "#f1f5f9", "#facc15", "#f87171"
+
+def _day_btn_color(d):
+    if d in _vn_holidays(d.year) or d.weekday() == 6:
+        return _DAYCOL_RED
+    return _DAYCOL_SAT if d.weekday() == 5 else _DAYCOL_NORMAL
+
+_btn_today = _now_ict.date()
+def _day_btn_label(d):
+    if d == _btn_today:                          return "Today"
+    if d == _btn_today + timedelta(days=1):      return "Tomorrow"
+    if d < _btn_today:                           return "Tonight"   # 00:00–05:59: vẫn đang trong đêm bắt đầu từ hôm qua
+    return f"{d.day:02d}/{d.month:02d}"
+
+_DAY_BTN_DATES  = [_night_base_ict.date() + timedelta(days=i) for i in range(7)]
+_DAY_BTN_LABELS = [_day_btn_label(d) for d in _DAY_BTN_DATES]
+_DAY_BTN_COLORS = [_day_btn_color(d) for d in _DAY_BTN_DATES]
 
 target_date = (_night_base_ict + timedelta(days=st.session_state.day_offset)).replace(tzinfo=None)
 next_date   = target_date + timedelta(days=1)
@@ -1461,7 +1612,6 @@ def _summarize_fallback_tiers(tier_counter):
             seen.add(p); uniq.append(p)
     return " & ".join(uniq)
 
-
 # ── GREAT NIGHT SCAN — quét 30 địa điểm yêu thích × 7 ngày tới ───────────────
 # Điều kiện thông báo (AND):
 #   1) Moon illumination < 32%
@@ -1854,7 +2004,6 @@ def _serialize_scan_result(result):
 
     return {"found": True, "best": best, "alternatives": alternatives}
 
-
 def tool_scan_best_weekend(region: str = "bac", top_n: int = 3) -> dict:
     """Tìm địa điểm và ngày chụp ảnh sao TỐT NHẤT trong 7 ngày tới, ưu tiên cuối tuần
     (Thứ 6/7/Chủ Nhật). Dùng khi user hỏi mơ hồ về thời gian: 'cuối tuần này',
@@ -1873,7 +2022,6 @@ def tool_scan_best_weekend(region: str = "bac", top_n: int = 3) -> dict:
     """
     return _serialize_scan_result(_run_best_scan(region=region, limit=max(1, min(5, int(top_n or 3)))))
 
-
 def tool_scan_tonight(region: str = "bac", top_n: int = 3) -> dict:
     """Kiểm tra điều kiện chụp ảnh sao ĐÊM NAY (chỉ đêm nay, không phải ngày khác)
     cho 1 vùng địa lý. Dùng khi user hỏi cụ thể 'tối nay', 'đêm nay'.
@@ -1888,9 +2036,8 @@ def tool_scan_tonight(region: str = "bac", top_n: int = 3) -> dict:
     """
     return _serialize_scan_result(_run_tonight_scan(region=region, limit=max(1, min(5, int(top_n or 3)))))
 
-
 def tool_check_location_darkness(location_name: str) -> dict:
-    """Tra cứu độ tối bầu trời (thang Bortle 1.0-9.0 theo bước 0.5, 1 = tối nhất/đẹp nhất) của MỘT
+    """Tra cứu độ tối bầu trời (thang Bortle 1.0-9.0 theo bước 0.1, 1 = tối nhất/đẹp nhất) của MỘT
     địa điểm cụ thể đã có trong database, theo tên hoặc từ khoá gần đúng.
     CHỈ dùng khi user hỏi về 1 địa điểm cụ thể đã biết tên VÀ chỉ hỏi về mức
     ô nhiễm ánh sáng — KHÔNG dùng cho câu hỏi liên quan thời tiết đêm nay (dùng
@@ -1912,7 +2059,6 @@ def tool_check_location_darkness(location_name: str) -> dict:
     return {"found": True, "matched_name": name, "lat": lat, "lon": lon,
             "bortle_class": bortle, "sqm": sqm}
 
-
 def _infer_region_from_loc_name(loc_name: str) -> str:
     """Suy ra region key (bac, trung, nam) từ tên địa điểm, dựa theo tỉnh
     (phần sau dấu phẩy cuối cùng trong tên, vd '..., Phu Tho' -> bac)."""
@@ -1921,7 +2067,6 @@ def _infer_region_from_loc_name(loc_name: str) -> str:
         if pref in prefs:
             return rk
     return "bac"  # fallback an toàn nếu không khớp tỉnh nào
-
 
 def _night_verdict_for_single_loc(lat, lon, day_off=0):
     """Tính verdict thời tiết đêm cho 1 toạ độ cụ thể (không quét cả vùng).
@@ -1945,7 +2090,6 @@ def _night_verdict_for_single_loc(lat, lon, day_off=0):
     if not verdict:
         return None
     return {"verdict": verdict, "moon_illum": moon_illum}
-
 
 def tool_check_location_tonight(location_name: str) -> dict:
     """Kiểm tra điều kiện chụp ảnh sao ĐÊM NAY tại MỘT địa điểm cụ thể theo tên
@@ -1990,7 +2134,6 @@ def tool_check_location_tonight(location_name: str) -> dict:
         "moon_illumination_pct": round(result["moon_illum"], 1) if result["moon_illum"] is not None else None,
         "is_good": tier_rank >= 1,
     }
-
 
 _EN_WD_AI = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
 
@@ -2118,7 +2261,7 @@ def ask_astro_ai(user_question: str):
 
     answer_text = None
     last_err = None
- 
+
     for model in ASTRO_AI_MODEL_CANDIDATES:
         for attempt in range(2):  # tối đa 1 lần thử lại cho mỗi model nếu dính 429
             try:
@@ -2146,7 +2289,7 @@ def ask_astro_ai(user_question: str):
                 break  # lỗi khác 429, hoặc đã retry rồi -> chuyển sang model kế tiếp
         if answer_text is not None:
             break
- 
+
     if answer_text is None:
         if last_err and ("429" in str(last_err) or "RESOURCE_EXHAUSTED" in str(last_err)):
             return ("⏳ AI đang bị giới hạn tần suất (free tier Gemini chỉ 5-15 "
@@ -2387,7 +2530,7 @@ _TILE_SAT_URL  = 'https://mt1.google.com/vt/lyrs=y&x={x}&y={y}&z={z}'
 
 if st.session_state.map_tile not in ("satellite", "himawari", "windy"):
     st.session_state.map_tile = "himawari"
- 
+
 # ==============================================================================
 # KHỐI C (v7 — bản sửa đúng) — xoá sạch KHỐI C cũ, dán nguyên khối này vào,
 # ngay trước dòng "m = folium.Map(".
@@ -2549,13 +2692,11 @@ _placeholder_text = st.session_state.get(
     "Hỏi AI địa điểm & thời điểm chụp milkyway...",
 )
 
-
 def _astro_ai_close():
     """Nút ✕ của khung kết quả AI: xoá câu trả lời + vòng tròn/bảng AI trên bản đồ."""
     st.session_state.astro_ai_answer = None
     st.session_state._ai_rings = []
     st.session_state._ai_panel = []
-
 
 _AI_X_HTML = ('<span class="mkw-x" data-close="chat" title="Close" style="float:right;margin:0 0 4px 8px;'
               'pointer-events:auto;cursor:pointer;color:#94a3b8;font-size:14px;line-height:1;">✕</span>')
@@ -2690,7 +2831,6 @@ _COMBINED_CTRL_TEMPLATE = Template("""
     if (_windyFrame) { _windyFrame.src = _buildWindySrc(lat, lon, zoom); }
   };
 
-
   // ── Light Map: lightpollutionmap.app Embed chính thức (iframe) ──────────────
   function _buildLpmSrc(lat, lon, zoom) {
     return 'https://lightpollutionmap.app/embed/'
@@ -2778,7 +2918,6 @@ _COMBINED_CTRL_TEMPLATE = Template("""
         var lng = 300 + idx * 10 + (nn - 1);
         map.fire('click', { latlng: L.latLng(89.35, lng) });
       };
-
 
       // ── Row 2: Windy | Satellite | Himawari ─────────────────────────────────
       var tileRow = L.DomUtil.create('div', '', col);
@@ -3321,9 +3460,6 @@ _loc_js_list = _json.dumps([
     for name, coords in LOCATION_DATABASE.items()
 ])
 _kanji_alias_js = _json.dumps(_KANJI_ALIAS, ensure_ascii=False)
-
-
-
 
 _SEARCH_CTRL_TEMPLATE = Template("""
 {% macro script(this, kwargs) %}
@@ -4663,7 +4799,6 @@ if map_data:
         st.session_state._scan_scanning = True
         st.rerun()
 
-
     # ── Priority 1: star marker click (via tooltip) ───────────────────────────
     # last_clicked luôn NULL với DivIcon, chỉ dùng tooltip để detect click ngôi sao.
     # Tooltip HTML chỉ chứa _strip_loc_num(bname) → match theo tên stripped.
@@ -4904,6 +5039,7 @@ with col_right:
                 <span style="color:#94a3b8;font-size:13px;font-weight:bold;">🌌 SKY QUALITY</span>
                 <div style="font-size:20px;font-weight:bold;color:#38bdf8;margin-top:5px;line-height:1.2;">Bortle Class {bortle_class:.1f}</div>
                 <div style="font-size:12px;color:#e2e8f0;margin-top:3px;">SQM: <b>{sqm_val}</b> mag/arcsec²</div>
+                <div style="font-size:10px;color:#94a3b8;margin-top:1px;">(World Atlas data)</div>
             </div>''')
     _sky_temp_card(round(float(st.session_state.lat), 3), round(float(st.session_state.lon), 3), _sq_left)
 
@@ -5059,8 +5195,32 @@ with col_right:
 
     _th_ph.markdown(_th_html(st.session_state.get("_th_last")), unsafe_allow_html=True)
 
-
 with col_left:
+    # CSS động cho 7 nút ngày: màu chữ từng nút (T2–T6 trắng, T7 vàng, CN/lễ đỏ) + nút đang chọn (cam)
+    _sel_i = max(0, min(6, int(st.session_state.day_offset)))
+    _dyn_btn_css = None
+    _DAY_TXT = {_DAYCOL_NORMAL: "#bfdbfe", _DAYCOL_SAT: "#facc15", _DAYCOL_RED: "#f87171"}
+    _dyn_parts = []
+    for _i, _c in enumerate(_DAY_BTN_COLORS):
+        _dyn_parts.append(
+            f".st-key-nav1 .st-key-dbtn_{_i} button p{{color:{_DAY_TXT.get(_c, '#bfdbfe')} !important;}}"
+        )
+    _WD = ["T2", "T3", "T4", "T5", "T6", "T7", "CN"]
+    for _i, (_lb, _dd) in enumerate(zip(_DAY_BTN_LABELS, _DAY_BTN_DATES)):
+        _sub = f"({_WD[_dd.weekday()]})" if "/" in _lb else f"{_dd.day:02d}/{_dd.month:02d} ({_WD[_dd.weekday()]})"
+        _dyn_parts.append(
+            f".st-key-nav1 .st-key-dbtn_{_i} button p::after{{content:\"{_sub}\";display:block;"
+            "font-size:.68em;font-weight:600;opacity:.85;line-height:1;margin-top:3px;}"
+        )
+    _dyn_parts.append(
+        f".st-key-nav1 .st-key-dbtn_{_sel_i} button{{"
+        "background:linear-gradient(180deg,#fdba74 0%,#fb923c 35%,#ea580c 70%,#c2410c 100%) !important;"
+        "border:1px solid #fed7aa !important;border-bottom-color:#7c2d12 !important;"
+        "box-shadow:0 3px 0 #7c2d12,0 7px 16px rgba(234,88,12,.55),0 0 20px rgba(251,146,60,.50),inset 0 1px 0 rgba(255,255,255,.65),inset 0 -2px 5px rgba(124,45,18,.45) !important;}"
+        f".st-key-nav1 .st-key-dbtn_{_sel_i} button::before{{opacity:1 !important;}}"
+        f".st-key-nav1 .st-key-dbtn_{_sel_i} button p{{color:#ffffff !important;text-shadow:0 1px 0 rgba(124,45,18,.95),0 0 8px rgba(255,237,213,.8) !important;}}"
+    )
+    _dyn_btn_css = "<style>" + "".join(_dyn_parts) + "</style>"
     # Inject CSS:
     # 1. Orange styling for date selectbox (nav2)
     # 2. Compact styling for location selectbox (nav3) — smaller font, tighter padding
@@ -5069,43 +5229,6 @@ with col_left:
 /* ── Pull col_left content closer to map ── */
 .st-key-nav_box { margin-top: -58px !important; }
 
-/* ── Date selectbox: shrink to fit content ── */
-[data-testid="stSelectbox"]:has(select[id*="sel_date"]) {
-    width: fit-content !important;
-    min-width: 0 !important;
-}
-[data-testid="stSelectbox"]:has(select[id*="sel_date"]) div[data-baseweb="select"] {
-    width: fit-content !important;
-    min-width: 0 !important;
-}
-[data-testid="stSelectbox"]:has(select[id*="sel_date"]) div[data-baseweb="select"] > div:first-child {
-    background: rgba(154,52,18,0.60) !important;
-    border: 1.5px solid rgba(234,88,12,0.75) !important;
-    box-shadow: 0 0 8px rgba(234,88,12,0.18) !important;
-    padding-left: 6px !important;
-    padding-right: 6px !important;
-}
-[data-testid="stSelectbox"]:has(select[id*="sel_date"]) span {
-    color: #fb923c !important;
-    font-weight: 700 !important;
-    font-size: 12px !important;
-}
-
-/* Streamlit mới dùng react-aria ComboBox (không còn <select>/baseweb) → chọn theo key "sel_date".
-   Ô nhập cần đủ rộng để hiện trọn "11/13 eve (Fri) → 11/14 morn (Sat)"; màn hình hẹp thì tự co lại. */
-.st-key-sel_date input {
-    min-width: 215px !important;
-}
-@media (max-width: 480px) {
-    /* iPhone: nút ⬅️➡️ nhỏ lại + gap hẹp để cả 3 phần nằm trên 1 hàng */
-    .st-key-nav1 [data-testid="stVerticalBlock"] { gap: 4px !important; }
-    .st-key-nav1 [data-testid="stButton"] button { width: 34px !important; }
-    .st-key-nav1 [data-testid="stElementContainer"]:has([data-testid="stButton"]) { flex: 0 0 34px !important; }
-    .st-key-sel_date input { min-width: calc(100vw - 196px) !important; font-size: 11px !important; }
-}
-@media (max-width: 380px) {
-    .st-key-sel_date input { font-size: 10px !important; }
-}
 /* LPM button is now a floating map control (bottomright) */
 
 /* ── NAV BOX: khung ngoài chứa 2 hàng con ──────────────────────────────────
@@ -5142,62 +5265,78 @@ with col_left:
     flex: 0 0 auto;
 }
 
-/* --- nav_row1: ⬅️ date ➡️ — không bao giờ wrap, co lại theo nội dung --- */
+/* ── 7 nút chọn ngày: 1 hàng duy nhất (PC & iPhone), nút kiểu 3D ── */
+.st-key-nav_box > div > [data-testid="stVerticalBlock"],
+div.st-key-nav_box[data-testid="stVerticalBlock"] { display: block !important; }
+div.st-key-nav_box[data-testid="stVerticalBlock"] {
+    background: rgba(255,255,255,0.03); border: 1px solid #1e293b; border-radius: 10px;
+    padding: 4px 4px 0 4px; box-sizing: border-box; width: 100% !important; row-gap: 0 !important;
+}
 .st-key-nav1,
 .st-key-nav1 > div,
 .st-key-nav1 [data-testid="stVerticalBlockBorderWrapper"],
-.st-key-nav1 [data-testid="stVerticalBlockBorderWrapper"] > div { width: auto !important; }
+.st-key-nav1 [data-testid="stVerticalBlockBorderWrapper"] > div { width: 100% !important; }
+div.st-key-nav1[data-testid="stVerticalBlock"],
 .st-key-nav1 [data-testid="stVerticalBlock"] {
-    display: flex !important;
-    flex-direction: row !important;
-    flex-wrap: nowrap !important;
-    align-items: center !important;
-    gap: 6px !important;
-    width: auto !important;
+    display: grid !important;
+    grid-template-columns: repeat(7, minmax(0, 1fr)) !important;
+    grid-auto-flow: row !important;
+    gap: 5px !important;
+    width: 100% !important;
+    padding: 0 0 5px 0 !important; margin: 0 !important;
+    background: none !important; border: 0 !important; border-radius: 0 !important; box-shadow: none !important;
+    overflow: visible !important;
+    container-type: inline-size;
 }
-.st-key-nav1 [data-testid="stElementContainer"] { margin: 0 !important; flex: 0 0 auto; }
+.st-key-nav1 [data-testid="stElementContainer"], .st-key-nav1 [data-testid="stButton"], .st-key-nav1 [data-testid="stLayoutWrapper"] { height: auto !important; min-height: 0 !important; overflow: visible !important; }
+.st-key-nav1 [data-testid="stElementContainer"],
+.st-key-nav1 [data-testid="stLayoutWrapper"] { margin: 0 !important; width: 100% !important; min-width: 0 !important; }
+.st-key-nav1 [data-testid="stButton"] { width: 100% !important; }
 .st-key-nav1 [data-testid="stButton"] button {
-    width: 44px !important; min-width: 0 !important; padding: 0 !important;
+    width: 100% !important; min-width: 0 !important; min-height: 0 !important; height: 36px !important;
+    padding: 0 !important; border-radius: 8px !important;
+    background: linear-gradient(180deg, rgba(59,130,246,.20), rgba(30,64,175,.14)) !important;
+    border: 1px solid rgba(96,165,250,.45) !important;
+    box-shadow: 0 3px 0 #1e3a8a, 0 5px 6px rgba(0,0,0,.55) !important;
+    line-height: 1 !important; white-space: nowrap !important; overflow: hidden !important;
+    position: relative; cursor: pointer;
+    transition: transform .12s ease, box-shadow .12s ease, filter .15s ease !important;
 }
-.st-key-nav1 [data-testid="stElementContainer"]:has([data-testid="stButton"]) { flex: 0 0 44px; }
-.st-key-nav1 [data-testid="stElementContainer"]:has(select[id*="sel_date"]) { flex: 0 1 auto; }
-.st-key-nav1 [data-testid="stElementContainer"]:has(select[id*="sel_date"]) [data-testid="stSelectbox"] {
-    width: fit-content !important;
+.st-key-nav1 [data-testid="stButton"] button::before {
+    content: ""; position: absolute; left: 6%; right: 6%; top: 1px; height: 42%;
+    border-radius: 8px 8px 14px 14px; opacity: 0;
+    background: linear-gradient(180deg, rgba(255,255,255,.32), rgba(255,255,255,0));
+    pointer-events: none;
+}
+.st-key-nav1 [data-testid="stButton"] button p {
+    margin: 0 !important; line-height: 1 !important; white-space: nowrap !important;
+    font-weight: 800 !important; letter-spacing: -0.3px !important; color: #bfdbfe;
+    font-size: clamp(8px, 2.3vw, 12px) !important; position: relative; z-index: 1;
+}
+@supports (width: 1cqw) {
+    .st-key-nav1 [data-testid="stButton"] button p { font-size: clamp(8px, 2.6cqw, 12px) !important; }
+}
+.st-key-nav1 [data-testid="stButton"] button:hover { transform: translateY(-1px) !important; filter: brightness(1.25) !important; border-color: rgba(147,197,253,.7) !important; outline: none !important; }
+.st-key-nav1 [data-testid="stButton"] button:focus { outline: none !important; }
+.st-key-nav1 [data-testid="stButton"] button:active {
+    transform: translateY(1px) !important; filter: brightness(.95) !important;
+    box-shadow: 0 1px 0 #1e3a8a !important;
 }
 
 /* nav2 (location+LPM) removed — now shown as floating label on map */
 
-</style>""", unsafe_allow_html=True)
+</style>""" + _dyn_btn_css, unsafe_allow_html=True)
 
-    # Nav controls — chỉ còn nav1: ⬅️  date  ➡️
+    # Nav controls — 7 nút ngày (đêm 0 … đêm 6) trên 1 hàng
+    def _pick_day(i):
+        st.session_state.day_offset = i
+        st.session_state.sel_date = date_options[i]
+
     nav_box = st.container(key="nav_box")
     with nav_box:
         with st.container(key="nav1"):
-            def _go_prev():
-                if st.session_state.day_offset > 0:
-                    st.session_state.day_offset -= 1
-                    st.session_state.sel_date = date_options[st.session_state.day_offset]
-
-            def _go_next():
-                if st.session_state.day_offset < 6:
-                    st.session_state.day_offset += 1
-                    st.session_state.sel_date = date_options[st.session_state.day_offset]
-
-            st.button("⬅️", key="btn_prev", on_click=_go_prev)
-
-            sel_label = st.selectbox("ngay", date_options, index=st.session_state.day_offset,
-                                     label_visibility="collapsed",
-                                     key="sel_date")
-            new_off = date_options.index(sel_label)
-            if new_off != st.session_state.day_offset:
-                st.session_state.day_offset = new_off
-                st.rerun()
-
-            st.button("➡️", key="btn_next", on_click=_go_next)
-
-
-
-
+            for _i, _lb in enumerate(_DAY_BTN_LABELS):
+                st.button(_lb, key=f"dbtn_{_i}", on_click=_pick_day, args=(_i,))
 
     # Table — custom styled HTML card
     if weather_table_data:
@@ -5829,10 +5968,6 @@ st.markdown("""<style>
 _sky_chart(float(st.session_state.lat), float(st.session_state.lon), float(loc_utc_offset_h))
 
 # Legend note
-
-
-
-
 
 # ── FOOTER ────────────────────────────────────────────────────────────────────
 st.markdown('<div class="footer-copyright">© Copyright: fcbzune</div>', unsafe_allow_html=True)
