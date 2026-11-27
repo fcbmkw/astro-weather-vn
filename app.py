@@ -2732,8 +2732,54 @@ if _ai_question and _ai_question.strip():
             st.session_state.lon = fly_to["lon"]
             st.session_state.map_center = [fly_to["lat"], fly_to["lon"]]
             st.session_state.zoom = 9
+            if fly_to.get("name"):
+                st.session_state.location_name = fly_to["name"]
+            st.session_state.is_custom_point = False
+            st.session_state.day_offset      = 0
+            st.session_state.sel_date        = date_options[0]
+            st.session_state._need_fly       = True
+            st.session_state._last_tip       = None
+            st.session_state._skip_prefetch  = True
         st.rerun()
 # ------------------------------------------------------------------------------ (hết KHỐI C v7)
+
+# ── TEMPERATURE hiện tại (Open-Meteo "current": cập nhật mỗi 15 phút, cả ngày lẫn đêm) ────────────────────
+@st.cache_data(ttl=600, show_spinner=False)
+def _current_temp(lat3: float, lon3: float):
+    """Nhiệt độ 2 m hiện tại tại toạ độ (lỗi → raise, cache_data không lưu lỗi)."""
+    r = requests.get("https://api.open-meteo.com/v1/forecast",
+                     params={"latitude": lat3, "longitude": lon3,
+                             "current": "temperature_2m,apparent_temperature,weather_code,is_day", "timezone": "auto"},
+                     timeout=6)
+    r.raise_for_status()
+    c = r.json()["current"]
+    return {"t": float(c["temperature_2m"]), "feels": c.get("apparent_temperature"), "time": str(c.get("time", "")),
+            "code": c.get("weather_code"), "day": c.get("is_day", 1)}
+
+
+# ── TẢI SONG SONG dữ liệu của địa điểm đang chọn ───────────────────────────────────────
+# Trước đây thời tiết → nhiệt độ → Nippon Kishou được gọi LẦN LƯỢT (thời gian cộng dồn).
+# Nay bắt đầu cùng lúc, ngay trước khi dựng map; đoạn dưới gọi lại đúng hàm đó sẽ lấy từ cache
+# (nếu chưa tải xong thì cache_data cho chờ, không gọi API lần hai).
+def _run_in_thread(fn, *args):
+    import threading
+    from streamlit.runtime.scriptrunner import add_script_run_ctx
+    def _job():
+        try:
+            fn(*args)
+        except Exception:
+            pass          # lỗi: chỗ dùng thật sẽ tự gọi lại và xử lý như cũ
+    th = threading.Thread(target=_job, daemon=True)
+    add_script_run_ctx(th)
+    th.start()
+
+def _prefetch_selected_location():
+    la, lo = st.session_state.lat, st.session_state.lon
+    la3, lo3 = round(float(la), 3), round(float(lo), 3)
+    _run_in_thread(_fetch_weather_raw, la, lo)
+    _run_in_thread(_current_temp, la3, lo3)
+
+_prefetch_selected_location()
 
 # ── Folium map — location/zoom từ session state (key cố định → không recreate) ──
 # prefer_location=False: KHÔNG reset vị trí camera khi rerun — chỉ set lần đầu.
@@ -4348,6 +4394,193 @@ if _ai_ring_locs:
 
 # (ghim 📍 cho điểm tự do do JS trong map vẽ — xem _ASTRO_SEL_JS)
 
+# ── MAP CLICK HANDLER ─────────────────────────────────────────────────────────
+# Chạy trong on_change của map, tức là TRƯỚC khi script chạy lại → mỗi lần click chỉ chạy 1 lượt.
+# (Trước đây: lượt 1 dựng lại cả map chỉ để đọc click rồi st.rerun() → lượt 2 dựng lại lần nữa.)
+# "return" = đã cập nhật session_state xong.
+def _handle_map_click(map_data):
+    if not map_data:
+        return
+    clicked_tip = map_data.get("last_object_clicked_tooltip")
+    lc          = map_data.get("last_clicked")
+
+    # ── Priority 0: SCAN sentinel — generic region-based encoding ───────────────
+    # lat=89.85 → best <region>     (lng = 100+region_idx)
+    # lat=89.75 → tonight <region>  (lng = 100+region_idx)
+    # lat=89.65 → "off": tắt banner/ring ngay lập tức, không load data
+    # lat=89.35 → "<region> N" plain scan (lng = 300 + region_idx*10 + (N-1))  ← rewritten from scratch
+    # region_idx: 0=bac,1=trung,2=nam,3=vietnam
+    _REGION_BY_IDX = ["bac", "trung", "nam", "vietnam"]
+    _lc_lat = lc.get("lat", 0) if lc else 0
+    _lc_lng = lc.get("lng", 0) if lc else 0
+    _is_best_trig    = abs(_lc_lat - 89.85) < 0.02
+    _is_tonight_trig = abs(_lc_lat - 89.75) < 0.02
+    _is_off_trig     = abs(_lc_lat - 89.65) < 0.02
+    _is_mkw_scan_trig = abs(_lc_lat - 89.55) < 0.02
+    _is_mkw_best_trig = abs(_lc_lat - 89.45) < 0.02
+    _is_region_scan_trig = abs(_lc_lat - 89.35) < 0.02
+    if lc and lc != st.session_state._last_lc and (
+            _is_best_trig or _is_tonight_trig or _is_off_trig or
+            _is_mkw_scan_trig or _is_mkw_best_trig or _is_region_scan_trig):
+        st.session_state._ai_rings = []   # Search box scan/off → bỏ vòng tròn + bảng của AI
+        st.session_state._ai_panel = []
+    if _is_mkw_scan_trig and lc and lc != st.session_state._last_lc:
+        _d = max(0, min(6, round((_lc_lng - 200.0) * 100)))
+        st.session_state._last_lc = lc
+        st.session_state._scan_days = _d
+        st.session_state._scan_region = "__mkw__"
+        st.session_state._scan_best = False
+        st.session_state._scan_tonight = False
+        st.session_state._scan_scanning = True
+        return
+    if _is_mkw_best_trig and lc and lc != st.session_state._last_lc:
+        st.session_state._last_lc = lc
+        st.session_state._scan_days = 0
+        st.session_state._scan_region = "__mkw__"
+        st.session_state._scan_best = True
+        st.session_state._scan_tonight = False
+        st.session_state._scan_scanning = True
+        return
+    if _is_off_trig and lc and lc != st.session_state._last_lc:
+        # "off": tắt kết quả search ngay — không gọi _run_*_scan, không gọi API.
+        st.session_state._last_lc       = lc
+        st.session_state._scan_result   = None
+        st.session_state._scan_fallback_label = None
+        st.session_state._scan_scanning = False
+        return
+    if _is_region_scan_trig and lc and lc != st.session_state._last_lc:
+        # lng = 300 + region_idx*10 + (N-1)  →  region_idx = (lng-300)//10, N-1 = (lng-300)%10
+        _raw = int(round(_lc_lng - 300.0))
+        _ridx2 = max(0, min(len(_REGION_BY_IDX) - 1, _raw // 10))
+        _nminus1 = max(0, min(5, _raw % 10))
+        st.session_state._last_lc = lc
+        st.session_state._scan_days = _nminus1
+        st.session_state._scan_region = _REGION_BY_IDX[_ridx2]
+        st.session_state._scan_best = False
+        st.session_state._scan_tonight = False
+        st.session_state._scan_scanning = True
+        return
+    _is_any_scan = _is_best_trig or _is_tonight_trig
+    _matched_region = None
+    if _is_any_scan:
+        _offset = _lc_lng - 100.0
+        if -0.01 <= _offset <= len(_REGION_BY_IDX) - 0.99:
+            _ridx = int(round(_offset))
+            if 0 <= _ridx < len(_REGION_BY_IDX):
+                _matched_region = _REGION_BY_IDX[_ridx]
+    if lc and lc != st.session_state._last_lc and _matched_region is not None:
+        st.session_state._last_lc       = lc
+        st.session_state._scan_days     = 0
+        st.session_state._scan_region   = _matched_region
+        st.session_state._scan_best     = _is_best_trig
+        st.session_state._scan_tonight  = _is_tonight_trig
+        st.session_state._scan_scanning = True
+        return
+
+    # ── Priority 1: star marker click (via tooltip) ───────────────────────────
+    # last_clicked luôn NULL với DivIcon, chỉ dùng tooltip để detect click ngôi sao.
+    # Tooltip HTML chỉ chứa _strip_loc_num(bname) → match theo tên stripped.
+    if clicked_tip:
+        matched = None
+        tip_str = str(clicked_tip)
+        for bname, bcoords in LOCATION_DATABASE.items():
+            stripped = _strip_loc_num(bname)
+            if stripped in tip_str:
+                matched = (bname, bcoords)
+                break
+        if matched:
+            bname, bcoords = matched
+            _tip_key = f"{bcoords[0]:.4f},{bcoords[1]:.4f}"
+            if _tip_key != st.session_state._last_tip:
+                # Nếu click sao mới → xử lý và lưu key để chặn rerun kép
+                # Nếu click lại cùng sao → _tip_key == _last_tip → skip (không cần rerun)
+                st.session_state._last_tip       = _tip_key
+                st.session_state._tip_click_id   = int(time.time() * 1000)
+                st.session_state._last_lc        = lc
+                st.session_state.lat             = bcoords[0]
+                st.session_state.lon             = bcoords[1]
+                st.session_state.location_name   = bname
+                st.session_state.is_custom_point = False
+                st.session_state._need_fly       = False
+                st.session_state.day_offset      = 0
+                st.session_state._skip_prefetch  = True
+                st.session_state.sel_date        = date_options[0]
+                return
+        else:
+            # Tooltip không match sao nào → reset để lần sau click cùng sao vẫn work
+            st.session_state._last_tip = None
+
+    # ── Priority 2: free-click on empty map ──────────────────────────────────
+    elif lc and lc != st.session_state._last_lc:
+        st.session_state._last_lc = lc
+        c_lat = round(lc["lat"], 4)
+        c_lon = ((round(lc["lng"], 4) + 180) % 360) - 180
+        hit = next(((n, c) for n, c in LOCATION_DATABASE.items()
+                    if abs(c_lat - c[0]) < 0.03 and abs(c_lon - c[1]) < 0.03), None)
+        if hit:
+            bname, bcoords = hit
+            if (abs(bcoords[0] - st.session_state.lat) > 0.0001 or
+                    abs(bcoords[1] - st.session_state.lon) > 0.0001 or
+                    st.session_state.is_custom_point):
+                st.session_state._tip_click_id   = int(time.time() * 1000)
+                st.session_state.lat             = bcoords[0]
+                st.session_state.lon             = bcoords[1]
+                st.session_state.location_name   = bname
+                st.session_state.is_custom_point = False
+                st.session_state._last_tip       = None
+                st.session_state.day_offset      = 0
+                st.session_state._skip_prefetch  = True
+                st.session_state.sel_date        = date_options[0]
+                return
+        else:
+            if abs(c_lat - st.session_state.lat) > 0.0001 or abs(c_lon - st.session_state.lon) > 0.0001:
+                st.session_state.lat             = c_lat
+                st.session_state.lon             = c_lon
+                st.session_state.location_name   = fetch_location_name(c_lat, c_lon)
+                st.session_state.is_custom_point = True
+                st.session_state._last_tip       = None
+                st.session_state.day_offset      = 0
+                st.session_state._skip_prefetch  = True
+                st.session_state.sel_date        = date_options[0]
+                return
+
+# ── DÙNG LẠI MAP ĐÃ DỰNG ─────────────────────────────────────────────────────
+# st_folium() phải render lại toàn bộ marker mỗi lượt chạy (phần tốn thời gian nhất của trang), dù map không đổi.
+# Lần đầu: gọi st_folium như cũ và ghi lại tham số gửi xuống trình duyệt.
+# Các lượt sau, nếu "chữ ký" map không đổi: gửi lại đúng tham số đó, bỏ qua bước render.
+try:
+    import streamlit_folium as _stf2
+    if not getattr(_stf2, "_astro_args_patched", False):
+        _orig_cf = _stf2._component_func
+        def _astro_component(*a, **kw):
+            _res = _orig_cf(*a, **kw)
+            try:
+                st.session_state["_astro_map_args"] = (st.session_state.get("_astro_map_sig"), dict(kw))
+            except Exception:
+                pass
+            return _res
+        _stf2._astro_orig_component = _orig_cf
+        _stf2._component_func = _astro_component
+        _stf2._astro_args_patched = True
+except Exception:
+    _stf2 = None
+
+def _on_map_change(hash_key):
+    _handle_map_click(st.session_state.get(hash_key))
+
+def _render_map(fmap, kwargs):
+    import functools
+    cached = st.session_state.get("_astro_map_args")
+    orig = getattr(_stf2, "_astro_orig_component", None)
+    if orig is not None and cached and cached[0] == st.session_state._astro_map_sig:
+        args = dict(cached[1])
+        args["center"] = kwargs.get("center")
+        args["on_change"] = functools.partial(_on_map_change, args["key"])
+        orig(**args)
+        return
+    # Lần đầu hoặc map thay đổi: dựng đầy đủ. on_change của st_folium chép dữ liệu click vào session_state[key].
+    st_folium(fmap, on_change=functools.partial(_on_map_change, kwargs["key"]), **kwargs)
+
 # ── st_folium ─────────────────────────────────────────────────────────────────
 # QUAN TRỌNG: KHÔNG đưa "zoom"/"center" vào returned_objects.
 # Nếu có → mỗi pan/zoom map trả data về Python → Streamlit rerun → map refresh.
@@ -4360,6 +4593,7 @@ st.session_state._astro_map_sig = repr((
     st.session_state.map_center, st.session_state.zoom, st.session_state.map_tile,
     repr(st.session_state.get("_scan_result")), repr(st.session_state.get("_ai_rings")),
     st.session_state.get("_scan_best"), st.session_state.get("_scan_tonight"),
+    (datetime.utcnow() + timedelta(hours=7)).strftime("%Y-%m-%d"),
 ))
 try:
     import streamlit_folium as _stf
@@ -4383,7 +4617,7 @@ _stfolium_kwargs = dict(
 if st.session_state._need_fly:
     _stfolium_kwargs["center"] = st.session_state.map_center
     st.session_state._need_fly = False   # reset ngay — chỉ fly 1 lần
-map_data = st_folium(m, **_stfolium_kwargs)
+_render_map(m, _stfolium_kwargs)
 
 # ── TOP-CENTER MAP LABEL — NIGHT VERDICT: giữ chỗ ngay dưới map (điền nội dung sau khi có thời tiết) ──
 _verdict_slot = st.empty()
@@ -4752,151 +4986,6 @@ _mkw_comp.html("<script>(function(){try{var P=window.parent;P.__astroSel=" + _se
 _lpm_url = (f"https://lightpollutionmap.app/"
             f"?lat={st.session_state.lat:.4f}&lng={st.session_state.lon:.4f}&zoom=10")
 
-# ── MAP CLICK HANDLER ─────────────────────────────────────────────────────────
-if map_data:
-    clicked_tip = map_data.get("last_object_clicked_tooltip")
-    lc          = map_data.get("last_clicked")
-
-    # ── Priority 0: SCAN sentinel — generic region-based encoding ───────────────
-    # lat=89.85 → best <region>     (lng = 100+region_idx)
-    # lat=89.75 → tonight <region>  (lng = 100+region_idx)
-    # lat=89.65 → "off": tắt banner/ring ngay lập tức, không load data
-    # lat=89.35 → "<region> N" plain scan (lng = 300 + region_idx*10 + (N-1))  ← rewritten from scratch
-    # region_idx: 0=bac,1=trung,2=nam,3=vietnam
-    _REGION_BY_IDX = ["bac", "trung", "nam", "vietnam"]
-    _lc_lat = lc.get("lat", 0) if lc else 0
-    _lc_lng = lc.get("lng", 0) if lc else 0
-    _is_best_trig    = abs(_lc_lat - 89.85) < 0.02
-    _is_tonight_trig = abs(_lc_lat - 89.75) < 0.02
-    _is_off_trig     = abs(_lc_lat - 89.65) < 0.02
-    _is_mkw_scan_trig = abs(_lc_lat - 89.55) < 0.02
-    _is_mkw_best_trig = abs(_lc_lat - 89.45) < 0.02
-    _is_region_scan_trig = abs(_lc_lat - 89.35) < 0.02
-    if lc and lc != st.session_state._last_lc and (
-            _is_best_trig or _is_tonight_trig or _is_off_trig or
-            _is_mkw_scan_trig or _is_mkw_best_trig or _is_region_scan_trig):
-        st.session_state._ai_rings = []   # Search box scan/off → bỏ vòng tròn của AI
-        st.session_state._ai_panel = []
-    if _is_mkw_scan_trig and lc and lc != st.session_state._last_lc:
-        _d = max(0, min(6, round((_lc_lng - 200.0) * 100)))
-        st.session_state._last_lc = lc
-        st.session_state._scan_days = _d
-        st.session_state._scan_region = "__mkw__"
-        st.session_state._scan_best = False
-        st.session_state._scan_tonight = False
-        st.session_state._scan_scanning = True
-        st.rerun()
-    if _is_mkw_best_trig and lc and lc != st.session_state._last_lc:
-        st.session_state._last_lc = lc
-        st.session_state._scan_days = 0
-        st.session_state._scan_region = "__mkw__"
-        st.session_state._scan_best = True
-        st.session_state._scan_tonight = False
-        st.session_state._scan_scanning = True
-        st.rerun()
-    if _is_off_trig and lc and lc != st.session_state._last_lc:
-        # "off": tắt kết quả search ngay — không gọi _run_*_scan, không gọi API.
-        st.session_state._last_lc       = lc
-        st.session_state._scan_result   = None
-        st.session_state._scan_fallback_label = None
-        st.session_state._scan_scanning = False
-        st.rerun()
-    if _is_region_scan_trig and lc and lc != st.session_state._last_lc:
-        # lng = 300 + region_idx*10 + (N-1)  →  region_idx = (lng-300)//10, N-1 = (lng-300)%10
-        _raw = int(round(_lc_lng - 300.0))
-        _ridx2 = max(0, min(9, _raw // 10))
-        _nminus1 = max(0, min(5, _raw % 10))
-        st.session_state._last_lc = lc
-        st.session_state._scan_days = _nminus1
-        st.session_state._scan_region = _REGION_BY_IDX[_ridx2]
-        st.session_state._scan_best = False
-        st.session_state._scan_tonight = False
-        st.session_state._scan_scanning = True
-        st.rerun()
-    _is_any_scan = _is_best_trig or _is_tonight_trig
-    _matched_region = None
-    if _is_any_scan:
-        _offset = _lc_lng - 100.0
-        if -0.01 <= _offset <= 9.01:  # region_idx 0-9
-            _ridx = int(round(_offset))
-            if 0 <= _ridx <= 9:
-                _matched_region = _REGION_BY_IDX[_ridx]
-    if lc and lc != st.session_state._last_lc and _matched_region is not None:
-        st.session_state._last_lc       = lc
-        st.session_state._scan_days     = 0
-        st.session_state._scan_region   = _matched_region
-        st.session_state._scan_best     = _is_best_trig
-        st.session_state._scan_tonight  = _is_tonight_trig
-        st.session_state._scan_scanning = True
-        st.rerun()
-
-    # ── Priority 1: star marker click (via tooltip) ───────────────────────────
-    # last_clicked luôn NULL với DivIcon, chỉ dùng tooltip để detect click ngôi sao.
-    # Tooltip HTML chỉ chứa _strip_loc_num(bname) → match theo tên stripped.
-    if clicked_tip:
-        matched = None
-        tip_str = str(clicked_tip)
-        for bname, bcoords in LOCATION_DATABASE.items():
-            stripped = _strip_loc_num(bname)
-            if stripped in tip_str:
-                matched = (bname, bcoords)
-                break
-        if matched:
-            bname, bcoords = matched
-            _tip_key = f"{bcoords[0]:.4f},{bcoords[1]:.4f}"
-            if _tip_key != st.session_state._last_tip:
-                # Nếu click sao mới → xử lý và lưu key để chặn rerun kép
-                # Nếu click lại cùng sao → _tip_key == _last_tip → skip (không cần rerun)
-                st.session_state._last_tip       = _tip_key
-                st.session_state._tip_click_id   = int(time.time() * 1000)
-                st.session_state._last_lc        = lc
-                st.session_state.lat             = bcoords[0]
-                st.session_state.lon             = bcoords[1]
-                st.session_state.location_name   = bname
-                st.session_state.is_custom_point = False
-                st.session_state._need_fly       = False
-                st.session_state.day_offset      = 0
-                st.session_state._skip_prefetch  = True
-                st.session_state.sel_date        = date_options[0]
-                st.rerun()
-        else:
-            # Tooltip không match sao nào → reset để lần sau click cùng sao vẫn work
-            st.session_state._last_tip = None
-
-    # ── Priority 2: free-click on empty map ──────────────────────────────────
-    elif lc and lc != st.session_state._last_lc:
-        st.session_state._last_lc = lc
-        c_lat = round(lc["lat"], 4)
-        c_lon = ((round(lc["lng"], 4) + 180) % 360) - 180
-        hit = next(((n, c) for n, c in LOCATION_DATABASE.items()
-                    if abs(c_lat - c[0]) < 0.03 and abs(c_lon - c[1]) < 0.03), None)
-        if hit:
-            bname, bcoords = hit
-            if (abs(bcoords[0] - st.session_state.lat) > 0.0001 or
-                    abs(bcoords[1] - st.session_state.lon) > 0.0001 or
-                    st.session_state.is_custom_point):
-                st.session_state._tip_click_id   = int(time.time() * 1000)
-                st.session_state.lat             = bcoords[0]
-                st.session_state.lon             = bcoords[1]
-                st.session_state.location_name   = bname
-                st.session_state.is_custom_point = False
-                st.session_state._last_tip       = None
-                st.session_state.day_offset      = 0
-                st.session_state._skip_prefetch  = True
-                st.session_state.sel_date        = date_options[0]
-                st.rerun()
-        else:
-            if abs(c_lat - st.session_state.lat) > 0.0001 or abs(c_lon - st.session_state.lon) > 0.0001:
-                st.session_state.lat             = c_lat
-                st.session_state.lon             = c_lon
-                st.session_state.location_name   = fetch_location_name(c_lat, c_lon)
-                st.session_state.is_custom_point = True
-                st.session_state._last_tip       = None
-                st.session_state.day_offset      = 0
-                st.session_state._skip_prefetch  = True
-                st.session_state.sel_date        = date_options[0]
-                st.rerun()
-
 # ── TẢI THỜI TIẾT + BẢNG KẾT QUẢ: chạy SAU khi map đã vẽ xong (hiển thị từng phần) ──────────
 # Trước đây đoạn này nằm phía trên map nên map phải chờ API thời tiết (5-10s). Nay map hiện trước,
 # rồi mới tới nhãn Night verdict → bảng/biểu đồ bên dưới. Các hàm (def) vẫn nằm ở vị trí cũ.
@@ -5122,19 +5211,6 @@ st.markdown("""
         [data-testid="stTable"] td:nth-child(5), [data-testid="stTable"] th:nth-child(5) { width: 35% !important; }
     </style>
 """, unsafe_allow_html=True)
-# ── TEMPERATURE hiện tại (Open-Meteo "current": cập nhật mỗi 15 phút, cả ngày lẫn đêm) ────────────────────
-@st.cache_data(ttl=600, show_spinner=False)
-def _current_temp(lat3: float, lon3: float):
-    """Nhiệt độ 2 m hiện tại tại toạ độ (lỗi → raise, cache_data không lưu lỗi)."""
-    r = requests.get("https://api.open-meteo.com/v1/forecast",
-                     params={"latitude": lat3, "longitude": lon3,
-                             "current": "temperature_2m,apparent_temperature,weather_code,is_day", "timezone": "auto"},
-                     timeout=6)
-    r.raise_for_status()
-    c = r.json()["current"]
-    return {"t": float(c["temperature_2m"]), "feels": c.get("apparent_temperature"), "time": str(c.get("time", "")),
-            "code": c.get("weather_code"), "day": c.get("is_day", 1)}
-
 def _wx_icon(code, is_day=1):
     """Mã thời tiết WMO (Open-Meteo weather_code) → emoji (ngày/đêm)."""
     try:
