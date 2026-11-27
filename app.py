@@ -4387,6 +4387,9 @@ map_data = st_folium(m, **_stfolium_kwargs)
 
 # ── TOP-CENTER MAP LABEL — NIGHT VERDICT: giữ chỗ ngay dưới map (điền nội dung sau khi có thời tiết) ──
 _verdict_slot = st.empty()
+# Slot rỗng không chiếm khoảng cách (gap) → bảng bên dưới bị kéo lên rồi đẩy xuống. Vì vậy lấp ngay bằng nhãn lần trước.
+_VERDICT_BLANK = '<div style="height:0;"></div>'
+_verdict_slot.markdown(st.session_state.get("_verdict_html", _VERDICT_BLANK), unsafe_allow_html=True)
 
 # ── SCAN RESULT BANNER — overlay bottom-left của map ────────────────────────
 # Dùng cùng cơ chế margin-top âm như top-center label (đã được xác nhận hoạt động).
@@ -5014,7 +5017,11 @@ if _verdict:
   </div>
 </div>
 </div>"""
+    st.session_state._verdict_html = _html_label
     _verdict_slot.markdown(_html_label, unsafe_allow_html=True)
+else:
+    st.session_state._verdict_html = _VERDICT_BLANK
+    _verdict_slot.markdown(_VERDICT_BLANK, unsafe_allow_html=True)
 
 
 # ── SKY QUALITY (Transparency/Seeing/Dew Risk) — tính trước khi vào layout ───
