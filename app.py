@@ -4254,59 +4254,6 @@ _ASTRO_SEL_JS = """
       }
     } catch (e) {}
   }
-  // ── NÚT 📍 KÉO-THẢ: kéo 📍 từ góc trái-trên (cạnh nút +/-) thả vào điểm bất kỳ → cập nhật thời tiết như click sao.
-  // Cũng bấm được: bấm 📍 (sáng lên) rồi chạm/click 1 điểm trên map. Dùng cùng đường map.fire('click') như ô tìm kiếm.
-  try {
-    var _pmap = __MAP__, _pc = _pmap.getContainer();
-    var _old = _pc.querySelector('#astro-pin-tool'); if (_old) _old.remove();
-    var _pb = document.createElement('div');
-    _pb.id = 'astro-pin-tool';
-    _pb.title = 'Kéo 📍 thả vào điểm bất kỳ trên map (hoặc bấm rồi chạm vào map)';
-    _pb.innerHTML = '&#128205;';
-    _pb.style.cssText = 'position:absolute;left:54px;top:10px;z-index:1000;width:30px;height:30px;line-height:30px;'
-      + 'text-align:center;font-size:18px;background:#fff;border:2px solid rgba(0,0,0,0.3);border-radius:4px;'
-      + 'cursor:grab;touch-action:none;user-select:none;-webkit-user-select:none;box-sizing:content-box;';
-    _pc.appendChild(_pb);
-    var _ghost = null, _drag = false, _armed = false, _sx = 0, _sy = 0, _moved = false;
-    function _drop(cx, cy){
-      var r = _pc.getBoundingClientRect(), x = cx - r.left, y = cy - r.top;
-      if (x < 0 || y < 0 || x > r.width || y > r.height) return;
-      var ll = _pmap.containerPointToLatLng(L.point(x, y));
-      ll = ll.wrap();
-      _pmap.fire('click', { latlng: ll });
-    }
-    function _arm(on){ _armed = on; _pb.style.background = on ? '#fde68a' : '#fff'; _pc.style.cursor = on ? 'crosshair' : ''; }
-    _pb.addEventListener('pointerdown', function(e){
-      e.preventDefault(); e.stopPropagation();
-      _drag = true; _moved = false; _sx = e.clientX; _sy = e.clientY;
-      try { _pb.setPointerCapture(e.pointerId); } catch (x) {}
-      _pb.style.cursor = 'grabbing';
-    });
-    _pb.addEventListener('pointermove', function(e){
-      if (!_drag) return;
-      if (!_moved && Math.abs(e.clientX - _sx) + Math.abs(e.clientY - _sy) > 6) {
-        _moved = true; _pmap.dragging.disable();
-        _ghost = document.createElement('div'); _ghost.innerHTML = '&#128205;';
-        _ghost.style.cssText = 'position:absolute;z-index:100000;font-size:30px;line-height:1;pointer-events:none;'
-          + 'filter:drop-shadow(0 0 6px rgba(255,50,50,0.9));transform:translate(-10px,-30px);';
-        _pc.appendChild(_ghost);
-      }
-      if (_ghost) { var r = _pc.getBoundingClientRect(); _ghost.style.left = (e.clientX - r.left) + 'px'; _ghost.style.top = (e.clientY - r.top) + 'px'; }
-    });
-    function _end(e){
-      if (!_drag) return;
-      _drag = false; _pb.style.cursor = 'grab';
-      try { _pb.releasePointerCapture(e.pointerId); } catch (x) {}
-      if (_ghost) { _ghost.remove(); _ghost = null; }
-      if (_moved) { _pmap.dragging.enable(); _arm(false); _drop(e.clientX, e.clientY); }
-      else { _arm(!_armed); }   // chỉ bấm (không kéo) → bật/tắt chế độ "chạm để chọn"
-    }
-    _pb.addEventListener('pointerup', _end);
-    _pb.addEventListener('pointercancel', function(e){ _drag = false; if (_ghost) { _ghost.remove(); _ghost = null; } try { _pmap.dragging.enable(); } catch (x) {} });
-    _pmap.on('click', function(ev){
-      if (_armed && ev.originalEvent) { _arm(false); }   // click thật khi đang "armed": map.fire phía dưới đã được Leaflet xử lý như click thường
-    });
-  } catch (e) {}
   setTimeout(function(){
     try { __REG__ } catch (e) {}
     try {
