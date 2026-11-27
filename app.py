@@ -1248,12 +1248,7 @@ if _wx_ui in WX_SOURCES:
     st.session_state.weather_source = _wx_ui
 if st.session_state.weather_source not in WX_SOURCES:
     st.session_state.weather_source = "Blend"
-hourly_data, _, _loc_utc_offset, _ep_label, _last_error = fetch_weather_7days(
-    st.session_state.lat, st.session_state.lon, st.session_state.weather_source
-)
-
-# UTC offset của location hiện tại (tính bằng giây) — dùng cho moon altitude
-loc_utc_offset_h = _loc_utc_offset / 3600.0  # đổi sang giờ, ví dụ ICT=+7
+# (đoạn tải thời tiết đã được chuyển xuống sau map — xem 'TẢI THỜI TIẾT + BẢNG KẾT QUẢ')
 
 desired_slots = [
     (target_date.year, target_date.month, target_date.day, 18, "18:00", target_date.strftime("%Y-%m-%d")),
@@ -1417,13 +1412,6 @@ def _merge_past_hours(hourly, lat, lon):
     except Exception:
         return hourly
 
-# Chuyển hourly_data sang dạng hashable để cache key hoạt động
-_hourly_night = _merge_past_hours(hourly_data, st.session_state.lat, st.session_state.lon)
-_hourly_frozen = tuple(
-    (k, tuple(v) if isinstance(v, list) else v)
-    for k, v in (_hourly_night.items() if _hourly_night else [])
-)
-
 # ── PREFETCH TẤT CẢ 7 ĐÊM ngay sau khi có hourly_data ────────────────────────
 # Mục đích: warm up cache cho toàn bộ 7 ngày ngay khi chọn location.
 # Khi user bấm Next/Prev → _build_night_data đã có cache → gần như instant.
@@ -1446,44 +1434,6 @@ def _make_slots_for_offset(base_ict, day_off):
         (nd.year, nd.month, nd.day,  5, "05:00", nd.strftime("%Y-%m-%d")),
         (nd.year, nd.month, nd.day,  6, "06:00", nd.strftime("%Y-%m-%d")),
     ])
-
-# Prefetch các ngày KHÁC: skip hoàn toàn ngay sau khi đổi location,
-# lần rerun tiếp theo mới prefetch theo thứ tự ngày liền kề trước.
-if st.session_state._skip_prefetch:
-    st.session_state._skip_prefetch = False
-else:
-    _day_off = st.session_state.day_offset
-    _prio = []
-    if _day_off + 1 < 7: _prio.append(_day_off + 1)
-    if _day_off - 1 >= 0: _prio.append(_day_off - 1)
-    for _p in range(7):
-        if _p not in _prio and _p != _day_off:
-            _prio.append(_p)
-    for _poff in _prio:
-        try:
-            _build_night_data(
-                st.session_state.lat, st.session_state.lon,
-                _make_slots_for_offset(_night_base_ict, _poff),
-                _hourly_frozen,
-                st.session_state.weather_source,
-                loc_utc_offset_h,
-            )
-        except Exception:
-            pass
-
-(weather_table_data, hours_labels, moon_altitudes, sun_altitudes,
- milkyway_altitudes, current_cloud_debug, sources_used) = _build_night_data(
-    st.session_state.lat, st.session_state.lon,
-    tuple(desired_slots),
-    _hourly_frozen,
-    st.session_state.weather_source,
-    loc_utc_offset_h,
-)
-sources_used = set(sources_used)  # trả về từ cache là frozenset hoặc set, đảm bảo là set
-
-# Label thực tế đã dùng — phân biệt auto-fallback với user chọn tay
-active_source_label = st.session_state.weather_source if not sources_used else \
-    (st.session_state.weather_source + " [" + "+".join(sorted(sources_used)) + "]")
 
 # ── NIGHT VERDICT (full night 18:00~06:00) ───────────────────────────────────
 def _build_night_verdict(table_data, sun_alts=None, moon_illum=None):
@@ -2790,6 +2740,7 @@ if _ai_question and _ai_question.strip():
 # Điều này là chìa khoá giúp pan/zoom mượt: Streamlit không can thiệp vào
 # camera position sau mỗi rerun.
 m = folium.Map(
+    keyboard=False,       # Leaflet gọi container.focus() khi mousedown → trình duyệt cuộn TRANG để lộ map → click lệch khi map bị che 1 phần
     location=st.session_state.map_center,
     zoom_start=st.session_state.zoom,
     tiles=None,           # không load tile mặc định; tile được inject qua JS bên dưới
@@ -4230,12 +4181,12 @@ if _selected_marker_args:
         tooltip=folium.Tooltip(_sel_tooltip, sticky=False, offset=(20, -10), parse_html=False),
     ).add_to(m)
 
-# ── Touch (iPhone/Android): tooltip (ảnh + tên) tự hiện ~6s sau khi chạm vào ngôi sao ──
+# ── Touch (iPhone/Android): tooltip (ảnh + tên) tự hiện ~15s sau khi chạm vào ngôi sao ──
 # Lý do: chạm sao → Streamlit rerun → map được vẽ lại → tooltip mặc định biến mất ngay.
 # Giải pháp: sau khi map vẽ lại, mở tooltip của sao đang chọn rồi tự đóng sau _TIP_SECONDS giây.
 # Token (_tip_click_id) + sessionStorage đảm bảo chỉ hiện 1 lần cho mỗi lần click,
 # dù map có bị vẽ lại vì lý do khác (scan, AI ring...). Desktop không bị ảnh hưởng (hover như cũ).
-_TIP_SECONDS = 6
+_TIP_SECONDS = 15
 _tip_tok = st.session_state.get("_tip_click_id", 0)
 if _tip_tok:
     m.get_root().script.add_child(folium.Element(
@@ -4386,70 +4337,8 @@ if st.session_state._need_fly:
     st.session_state._need_fly = False   # reset ngay — chỉ fly 1 lần
 map_data = st_folium(m, **_stfolium_kwargs)
 
-# ── TOP-CENTER MAP LABEL — NIGHT VERDICT (full night 18:00~06:00) ────────────
-if st.session_state.day_offset == 0:
-    (_full_table_data, _full_hours_labels, _full_moon_alt, _full_sun_alt, *_rest_full) = _build_night_data(
-        st.session_state.lat, st.session_state.lon,
-        tuple(_full_night_slots),
-        _hourly_frozen,
-        st.session_state.weather_source,
-        loc_utc_offset_h,
-    )
-    _verdict = _build_night_verdict(_full_table_data, _full_sun_alt, moon_pct)
-else:
-    _verdict = _build_night_verdict(weather_table_data, sun_altitudes, moon_pct)
-if _verdict:
-    # ── Tính nhiệt độ min/max của đêm (18:00~06:00) ──────────────────────────
-    if st.session_state.day_offset == 0:
-        _temp_src_table = _full_table_data
-    else:
-        _temp_src_table = weather_table_data
-    _night_temps = [r.get("_temp") for r in _temp_src_table[:12] if r.get("_temp") is not None]
-    if _night_temps:
-        _temp_range_str = f"{round(max(_night_temps))}°-{round(min(_night_temps))}°"
-    else:
-        _temp_range_str = ""
-
-    # ── Date label: "Tonight" nếu day_offset=0, còn lại "MM/DD night(min°~max°)" ─
-    if st.session_state.day_offset == 0:
-        _date_label = f"Tonight{f' ({_temp_range_str})' if _temp_range_str else ''}"
-    else:
-        _date_label = f"{target_date.month}/{target_date.day} night{f' ({_temp_range_str})' if _temp_range_str else ''}"
-
-    _warn_speed = "1.1s" if _verdict["anim"] == "blink-warn" else "1.9s"
-    _html_label = f"""
-<style>
-@keyframes blink-warn   {{0%,100%{{opacity:1}}50%{{opacity:0.25}}}}
-@keyframes blink-smile  {{0%,100%{{opacity:1;transform:scale(1)}}50%{{opacity:0.80;transform:scale(1.05)}}}}
-@keyframes blink-neutral{{0%,100%{{opacity:1}}50%{{opacity:0.55}}}}
-.astro-maplabel{{
-  position:absolute;top:40px;left:50%;transform:translateX(-50%);
-  z-index:9999;pointer-events:none;
-  display:inline-flex;flex-direction:column;align-items:center;gap:1px;
-  padding:5px 18px 6px 14px;border-radius:22px;
-  font-family:sans-serif;
-  white-space:nowrap;
-  box-shadow:0 2px 16px rgba(0,0,0,0.75);
-  backdrop-filter:blur(3px);
-  background:{_verdict["bg"]};border:1.5px solid {_verdict["border"]};color:{_verdict["color"]};
-}}
-.astro-maplabel-top{{ font-size:9px;opacity:0.55;font-weight:600;letter-spacing:0.04em;line-height:1.2; }}
-.astro-maplabel-main{{ display:flex;align-items:center;gap:7px;font-size:13px;font-weight:700;line-height:1.3; }}
-.astro-maplabel-stars{{ font-size:11px;opacity:0.85;letter-spacing:1px; }}
-.astro-maplabel-sub{{ font-size:10px;opacity:0.65;font-weight:500; }}
-</style>
-<div style="position:relative;margin-top:-644px;height:0;overflow:visible;z-index:9999;">
-<div class="astro-maplabel">
-  <span class="astro-maplabel-top">{_date_label}</span>
-  <div class="astro-maplabel-main">
-    <span style="animation:{_verdict["anim"]} {_warn_speed} ease-in-out infinite;display:inline-block;font-size:17px;">{_verdict["icon"]}</span>
-    <span>{_verdict["tier"]}</span>
-    <span class="astro-maplabel-stars">{_verdict["stars"]}</span>
-    <span class="astro-maplabel-sub">{_verdict["sub"]}</span>
-  </div>
-</div>
-</div>"""
-    st.markdown(_html_label, unsafe_allow_html=True)
+# ── TOP-CENTER MAP LABEL — NIGHT VERDICT: giữ chỗ ngay dưới map (điền nội dung sau khi có thời tiết) ──
+_verdict_slot = st.empty()
 
 # ── SCAN RESULT BANNER — overlay bottom-left của map ────────────────────────
 # Dùng cùng cơ chế margin-top âm như top-center label (đã được xác nhận hoạt động).
@@ -4947,6 +4836,129 @@ if map_data:
                 st.session_state._skip_prefetch  = True
                 st.session_state.sel_date        = date_options[0]
                 st.rerun()
+
+# ── TẢI THỜI TIẾT + BẢNG KẾT QUẢ: chạy SAU khi map đã vẽ xong (hiển thị từng phần) ──────────
+# Trước đây đoạn này nằm phía trên map nên map phải chờ API thời tiết (5-10s). Nay map hiện trước,
+# rồi mới tới nhãn Night verdict → bảng/biểu đồ bên dưới. Các hàm (def) vẫn nằm ở vị trí cũ.
+hourly_data, _, _loc_utc_offset, _ep_label, _last_error = fetch_weather_7days(
+    st.session_state.lat, st.session_state.lon, st.session_state.weather_source
+)
+
+# UTC offset của location hiện tại (tính bằng giây) — dùng cho moon altitude
+loc_utc_offset_h = _loc_utc_offset / 3600.0  # đổi sang giờ, ví dụ ICT=+7
+
+# Chuyển hourly_data sang dạng hashable để cache key hoạt động
+_hourly_night = _merge_past_hours(hourly_data, st.session_state.lat, st.session_state.lon)
+_hourly_frozen = tuple(
+    (k, tuple(v) if isinstance(v, list) else v)
+    for k, v in (_hourly_night.items() if _hourly_night else [])
+)
+
+# Prefetch các ngày KHÁC: skip hoàn toàn ngay sau khi đổi location,
+# lần rerun tiếp theo mới prefetch theo thứ tự ngày liền kề trước.
+if st.session_state._skip_prefetch:
+    st.session_state._skip_prefetch = False
+else:
+    _day_off = st.session_state.day_offset
+    _prio = []
+    if _day_off + 1 < 7: _prio.append(_day_off + 1)
+    if _day_off - 1 >= 0: _prio.append(_day_off - 1)
+    for _p in range(7):
+        if _p not in _prio and _p != _day_off:
+            _prio.append(_p)
+    for _poff in _prio:
+        try:
+            _build_night_data(
+                st.session_state.lat, st.session_state.lon,
+                _make_slots_for_offset(_night_base_ict, _poff),
+                _hourly_frozen,
+                st.session_state.weather_source,
+                loc_utc_offset_h,
+            )
+        except Exception:
+            pass
+
+(weather_table_data, hours_labels, moon_altitudes, sun_altitudes,
+ milkyway_altitudes, current_cloud_debug, sources_used) = _build_night_data(
+    st.session_state.lat, st.session_state.lon,
+    tuple(desired_slots),
+    _hourly_frozen,
+    st.session_state.weather_source,
+    loc_utc_offset_h,
+)
+sources_used = set(sources_used)  # trả về từ cache là frozenset hoặc set, đảm bảo là set
+
+# Label thực tế đã dùng — phân biệt auto-fallback với user chọn tay
+active_source_label = st.session_state.weather_source if not sources_used else \
+    (st.session_state.weather_source + " [" + "+".join(sorted(sources_used)) + "]")
+
+
+# ── Nhãn NIGHT VERDICT trên map: nội dung được điền ở đoạn tải thời tiết phía dưới ──
+# ── TOP-CENTER MAP LABEL — NIGHT VERDICT (full night 18:00~06:00) ────────────
+if st.session_state.day_offset == 0:
+    (_full_table_data, _full_hours_labels, _full_moon_alt, _full_sun_alt, *_rest_full) = _build_night_data(
+        st.session_state.lat, st.session_state.lon,
+        tuple(_full_night_slots),
+        _hourly_frozen,
+        st.session_state.weather_source,
+        loc_utc_offset_h,
+    )
+    _verdict = _build_night_verdict(_full_table_data, _full_sun_alt, moon_pct)
+else:
+    _verdict = _build_night_verdict(weather_table_data, sun_altitudes, moon_pct)
+if _verdict:
+    # ── Tính nhiệt độ min/max của đêm (18:00~06:00) ──────────────────────────
+    if st.session_state.day_offset == 0:
+        _temp_src_table = _full_table_data
+    else:
+        _temp_src_table = weather_table_data
+    _night_temps = [r.get("_temp") for r in _temp_src_table[:12] if r.get("_temp") is not None]
+    if _night_temps:
+        _temp_range_str = f"{round(max(_night_temps))}°-{round(min(_night_temps))}°"
+    else:
+        _temp_range_str = ""
+
+    # ── Date label: "Tonight" nếu day_offset=0, còn lại "MM/DD night(min°~max°)" ─
+    if st.session_state.day_offset == 0:
+        _date_label = f"Tonight{f' ({_temp_range_str})' if _temp_range_str else ''}"
+    else:
+        _date_label = f"{target_date.month}/{target_date.day} night{f' ({_temp_range_str})' if _temp_range_str else ''}"
+
+    _warn_speed = "1.1s" if _verdict["anim"] == "blink-warn" else "1.9s"
+    _html_label = f"""
+<style>
+@keyframes blink-warn   {{0%,100%{{opacity:1}}50%{{opacity:0.25}}}}
+@keyframes blink-smile  {{0%,100%{{opacity:1;transform:scale(1)}}50%{{opacity:0.80;transform:scale(1.05)}}}}
+@keyframes blink-neutral{{0%,100%{{opacity:1}}50%{{opacity:0.55}}}}
+.astro-maplabel{{
+  position:absolute;top:40px;left:50%;transform:translateX(-50%);
+  z-index:9999;pointer-events:none;
+  display:inline-flex;flex-direction:column;align-items:center;gap:1px;
+  padding:5px 18px 6px 14px;border-radius:22px;
+  font-family:sans-serif;
+  white-space:nowrap;
+  box-shadow:0 2px 16px rgba(0,0,0,0.75);
+  backdrop-filter:blur(3px);
+  background:{_verdict["bg"]};border:1.5px solid {_verdict["border"]};color:{_verdict["color"]};
+}}
+.astro-maplabel-top{{ font-size:9px;opacity:0.55;font-weight:600;letter-spacing:0.04em;line-height:1.2; }}
+.astro-maplabel-main{{ display:flex;align-items:center;gap:7px;font-size:13px;font-weight:700;line-height:1.3; }}
+.astro-maplabel-stars{{ font-size:11px;opacity:0.85;letter-spacing:1px; }}
+.astro-maplabel-sub{{ font-size:10px;opacity:0.65;font-weight:500; }}
+</style>
+<div style="position:relative;margin-top:-644px;height:0;overflow:visible;z-index:9999;">
+<div class="astro-maplabel">
+  <span class="astro-maplabel-top">{_date_label}</span>
+  <div class="astro-maplabel-main">
+    <span style="animation:{_verdict["anim"]} {_warn_speed} ease-in-out infinite;display:inline-block;font-size:17px;">{_verdict["icon"]}</span>
+    <span>{_verdict["tier"]}</span>
+    <span class="astro-maplabel-stars">{_verdict["stars"]}</span>
+    <span class="astro-maplabel-sub">{_verdict["sub"]}</span>
+  </div>
+</div>
+</div>"""
+    _verdict_slot.markdown(_html_label, unsafe_allow_html=True)
+
 
 # ── SKY QUALITY (Transparency/Seeing/Dew Risk) — tính trước khi vào layout ───
 def _build_sky_quality(table_data, sun_alts=None):
