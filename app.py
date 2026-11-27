@@ -933,6 +933,47 @@ def fetch_weather_7days(lat, lon, source="ECMWF"):
     hourly, utc_offset, ep_label, last_error = _fetch_weather_raw(lat, lon)
     return hourly, source, utc_offset, ep_label, last_error
 
+# ── WARM-UP NỀN: tải sẵn thời tiết cho toàn bộ địa điểm (bấm sao → có data ngay, không chờ API) ──
+# Chạy 1 lần / process server trong thread nền (daemon). Bắt đầu sau 15s để không tranh băng thông
+# với lần mở trang đầu tiên. Dữ liệu vào kho _wx_prefetch_store() → _fetch_weather_raw() tự lấy ra dùng.
+# Làm mới mỗi ~50 phút (~100 request/giờ tới Open-Meteo, vẫn trong hạn mức miễn phí).
+@st.cache_resource
+def _start_wx_warmup():
+    import threading
+    store = _wx_prefetch_store()                       # lấy ở main thread, truyền vào thread nền
+    coords = list(dict.fromkeys(tuple(c[:2]) for c in LOCATION_DATABASE.values()))
+    def _run():
+        import time as _t
+        from concurrent.futures import ThreadPoolExecutor
+        _t.sleep(15)
+        while True:
+            now = _t.time()
+            todo = [c for c in coords if now - store["at"].get(c, 0) > 3000]
+            def one(c):
+                try:
+                    return c, _fetch_weather_raw_impl(c[0], c[1])
+                except Exception:
+                    return c, None
+            try:
+                with ThreadPoolExecutor(max_workers=3) as ex:
+                    for c, res in ex.map(one, todo):
+                        if res and res[2] != "offline":
+                            store["data"][c] = res
+                            store["at"][c] = _t.time()
+            except Exception:
+                pass
+            _t.sleep(600)
+    th = threading.Thread(target=_run, daemon=True, name="wx-warmup")
+    try:
+        from streamlit.runtime.scriptrunner import add_script_run_ctx
+        add_script_run_ctx(th)
+    except Exception:
+        pass
+    th.start()
+    return th
+
+_start_wx_warmup()
+
 def get_val(hourly, field, idx, prefer_ecmwf=True):
     """
     Extract a single numeric value for a field at index idx (ECMWF IFS025 — nguồn duy nhất; GFS đã bỏ).
@@ -4016,16 +4057,36 @@ m.get_root().html.add_child(folium.Element("""
 # ── LOCATION MARKERS ──────────────────────────────────────────────────────────
 import os, base64
 
+@st.cache_data(show_spinner=False, max_entries=512)
 def _get_loc_image_b64(loc_name: str):
     """Tìm ảnh theo số thứ tự ở đầu tên địa danh (vd: '23. Hoshinomura...' → tìm images/23.*).
-    Trả về (base64_string, mime_type) hoặc (None, None) nếu không tìm thấy."""
+    Trả về (base64_string, mime_type) hoặc (None, None) nếu không tìm thấy.
+    TỐI ƯU: ảnh gốc được thu nhỏ thành thumbnail JPEG nhẹ (~10-20KB) rồi cache lại,
+    nên mỗi lần rerun không phải đọc đĩa + encode lại, và HTML của map nhẹ đi rất nhiều."""
     num = loc_name.split(".")[0].strip()
     img_dir = os.path.join(os.path.dirname(__file__), "images")
     if not os.path.isdir(img_dir):
         return None, None
     for ext, mime in [("jpg","image/jpeg"),("jpeg","image/jpeg"),("png","image/png"),("webp","image/webp")]:
         path = os.path.join(img_dir, f"{num}.{ext}")
-        if os.path.isfile(path):
+        if not os.path.isfile(path):
+            continue
+        try:
+            import io
+            from PIL import Image, ImageOps
+            im = ImageOps.exif_transpose(Image.open(path))
+            if im.mode in ("RGBA", "LA") or (im.mode == "P" and "transparency" in im.info):
+                im = im.convert("RGBA")
+                bg = Image.new("RGB", im.size, (255, 255, 255))
+                bg.paste(im, mask=im.split()[-1])
+                im = bg
+            else:
+                im = im.convert("RGB")
+            im.thumbnail((330, 220))          # hiển thị 220px → 330px là đủ nét cho màn hình retina
+            buf = io.BytesIO()
+            im.save(buf, "JPEG", quality=70, optimize=True, progressive=True)
+            return base64.b64encode(buf.getvalue()).decode(), "image/jpeg"
+        except Exception:                      # lỗi Pillow → dùng ảnh gốc như cũ
             with open(path, "rb") as f:
                 return base64.b64encode(f.read()).decode(), mime
     return None, None
@@ -4160,7 +4221,7 @@ if _selected_marker_args:
             .selected-star-marker { z-index: 999999 !important; }
         </style>
     """))
-    folium.Marker(
+    _sel_marker = folium.Marker(
         _sel_coords,
         icon=folium.DivIcon(
             html=_sel_html,
@@ -4168,6 +4229,24 @@ if _selected_marker_args:
             class_name="selected-star-marker"),
         tooltip=folium.Tooltip(_sel_tooltip, sticky=False, offset=(20, -10), parse_html=False),
     ).add_to(m)
+
+# ── Touch (iPhone/Android): tooltip (ảnh + tên) tự hiện ~6s sau khi chạm vào ngôi sao ──
+# Lý do: chạm sao → Streamlit rerun → map được vẽ lại → tooltip mặc định biến mất ngay.
+# Giải pháp: sau khi map vẽ lại, mở tooltip của sao đang chọn rồi tự đóng sau _TIP_SECONDS giây.
+# Token (_tip_click_id) + sessionStorage đảm bảo chỉ hiện 1 lần cho mỗi lần click,
+# dù map có bị vẽ lại vì lý do khác (scan, AI ring...). Desktop không bị ảnh hưởng (hover như cũ).
+_TIP_SECONDS = 6
+_tip_tok = st.session_state.get("_tip_click_id", 0)
+if _tip_tok:
+    m.get_root().script.add_child(folium.Element(
+        "(function(){try{"
+        "if(!window.matchMedia('(hover: none), (pointer: coarse)').matches)return;"
+        "var tok='" + str(_tip_tok) + "';"
+        "try{if(sessionStorage.getItem('astroTipShown')===tok)return;sessionStorage.setItem('astroTipShown',tok);}catch(e){}"
+        "setTimeout(function(){try{var mk=" + _sel_marker.get_name() + ";mk.openTooltip();"
+        "setTimeout(function(){try{mk.closeTooltip();}catch(e){}}," + str(_TIP_SECONDS * 1000) + ");}catch(e){}},500);"
+        "}catch(e){}})();"
+    ))
 
 is_bookmark = any(abs(c[0]-st.session_state.lat)<0.001 and abs(c[1]-st.session_state.lon)<0.001
                   for c in LOCATION_DATABASE.values())
@@ -4817,6 +4896,7 @@ if map_data:
                 # Nếu click sao mới → xử lý và lưu key để chặn rerun kép
                 # Nếu click lại cùng sao → _tip_key == _last_tip → skip (không cần rerun)
                 st.session_state._last_tip       = _tip_key
+                st.session_state._tip_click_id   = int(time.time() * 1000)
                 st.session_state._last_lc        = lc
                 st.session_state.lat             = bcoords[0]
                 st.session_state.lon             = bcoords[1]
@@ -4844,6 +4924,7 @@ if map_data:
             if (abs(bcoords[0] - st.session_state.lat) > 0.0001 or
                     abs(bcoords[1] - st.session_state.lon) > 0.0001 or
                     st.session_state.is_custom_point):
+                st.session_state._tip_click_id   = int(time.time() * 1000)
                 st.session_state.lat             = bcoords[0]
                 st.session_state.lon             = bcoords[1]
                 st.session_state.map_center      = [bcoords[0], bcoords[1]]
