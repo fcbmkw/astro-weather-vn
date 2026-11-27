@@ -2873,6 +2873,12 @@ _COMBINED_CTRL_TEMPLATE = Template("""
         + 'transition:background 0.2s;white-space:nowrap;cursor:pointer;flex-shrink:0;';
       a.onmouseover = function(){ a.style.background = 'rgba(34,197,94,0.28)'; };
       a.onmouseout  = function(){ a.style.background = 'rgba(34,197,94,0.12)'; };
+      // Cập nhật nhãn + link GoogleMap khi đổi địa điểm (không cần dựng lại map) — gọi từ bridge parent.__astroSel
+      window.__astroLabel = function(name, lat, lon) {
+        loc.textContent = name || '';
+        a.href = 'https://www.google.com/maps?q=' + lat + ',' + lon;
+      };
+      try { var _s0 = window.parent.__astroSel; if (_s0) window.__astroLabel(_s0.name, _s0.lat, _s0.lon); } catch (e) {}
 
       // ── SCAN trigger — hidden; called by search box with "best <region>", "tonight <region>" ───
       // Sentinel encoding (lat below Mercator max 85.05, always valid click):
@@ -3430,11 +3436,9 @@ class _CombinedControl(MacroElement):
 
 # ── COMBINED CONTROL (Label/GoogleMap on top, Tile switcher below, gap=6px) ────
 _CombinedControl(
-    lpm_url=_lpm_url,
-    location_name=_strip_loc_num(st.session_state.location_name),
+    lpm_url="",
+    location_name="",          # nhãn + link GoogleMap do JS cập nhật (window.__astroLabel)
     initial_tile=st.session_state.map_tile,
-    lat=st.session_state.lat,
-    lon=st.session_state.lon,
 ).add_to(m)
 
 # ── SEARCH CONTROL — inject location list vào JS, nằm topleft trên map ──────
@@ -4100,22 +4104,18 @@ def _get_star_colors(loc_name):
     pref = parts[-1].strip() if len(parts) > 1 else ""
     return _PREF_REGION_COLOR.get(pref, _DEFAULT_COLOR)
 
+# ── Mọi ngôi sao vẽ CÙNG 1 kiểu, KHÔNG phụ thuộc địa điểm đang chọn ───────────────────────────
+# Lý do: streamlit-folium dùng hash của JS làm key component → JS đổi (vì đổi sao được chọn) là map bị
+# tạo lại từ đầu (reload + nhảy về giữa). Nay việc tô sáng sao được chọn / nhãn / ghim 📍 / tooltip tự hiện
+# do JS trong map làm (nhận lệnh qua cầu nối parent.__astroSel, xem _mkw_comp.html phía dưới) → map KHÔNG reload.
+_TIP_SECONDS = 15
+m.get_root().html.add_child(folium.Element("""<style>
+@keyframes star-pulse-sel {0%,100%{transform:scale(1);opacity:1;}50%{transform:scale(1.35);opacity:0.55;}}
+.selected-star-marker { z-index: 999999 !important; }
+</style>"""))
+_astro_mk_reg = []
 for loc_name, loc_coords in LOCATION_DATABASE.items():
-    is_sel = abs(loc_coords[0]-st.session_state.lat)<0.001 and abs(loc_coords[1]-st.session_state.lon)<0.001
-    try:
-        loc_num = int(loc_name.split(".")[0].strip())
-    except ValueError:
-        loc_num = 99
-    is_frequent = (loc_num <= 27)
     _nc, _sc, _sg = _get_star_colors(loc_name)
-    if is_sel:
-        star_color = _sc
-        star_glow  = _sg
-        star_size  = "22px"
-    else:
-        star_color = _nc
-        star_glow  = "none"
-        star_size  = "16px"
     b64, mime = _get_loc_image_b64(loc_name)
     if b64:
         img_html = (f'<img src="data:{mime};base64,{b64}" '
@@ -4129,75 +4129,107 @@ for loc_name, loc_coords in LOCATION_DATABASE.items():
                     f'color:#1e293b;max-width:230px;line-height:1.35;'
                     f'white-space:normal;word-break:break-word;overflow-wrap:break-word;">'
                     f'{img_html}{_loc_label}</div>')
-    if is_sel:
-        # Ngôi sao được chọn: nhấp nháy (pulse) để dễ nhận biết + z-index cao để
-        # không bị các ngôi sao khác che mất khi zoom nhỏ.
-        _star_html = (
-            f'<style>@keyframes star-pulse-sel {{'
-            f'0%,100%{{transform:scale(1);opacity:1;}}'
-            f'50%{{transform:scale(1.35);opacity:0.55;}}}}</style>'
-            f'<div style="font-size:{star_size};color:{star_color};'
-            f'text-shadow:0 0 4px rgba(0,0,0,0.9);filter:{star_glow};'
-            f'cursor:pointer;line-height:1;font-family:serif;'
-            f'animation:star-pulse-sel 1.1s ease-in-out infinite;'
-            f'transform-origin:center;display:inline-block;'
-            f'position:relative;z-index:10000;">★</div>'
-        )
-        # Lưu lại, vẽ sau cùng (sau loop) để marker này nằm trên cùng DOM stack
-        _selected_marker_args = (loc_coords, _star_html, tooltip_html)
-        continue
-    else:
-        _star_html = (
-            f'<div style="font-size:{star_size};color:{star_color};'
-            f'text-shadow:0 0 4px rgba(0,0,0,0.9);filter:{star_glow};'
-            f'cursor:pointer;line-height:1;font-family:serif;">★</div>'
-        )
-    folium.Marker(
+    _k = f"{loc_coords[0]:.4f},{loc_coords[1]:.4f}"
+    _star_html = (
+        f'<div class="astro-star" data-k="{_k}" data-nc="{_nc}" data-sc="{_sc}" data-sg="{_sg}" '
+        f'style="font-size:16px;color:{_nc};text-shadow:0 0 4px rgba(0,0,0,0.9);filter:none;'
+        f'cursor:pointer;line-height:1;font-family:serif;">★</div>'
+    )
+    _mk = folium.Marker(
         loc_coords,
         icon=folium.DivIcon(
             html=_star_html,
             icon_size=(24,24), icon_anchor=(12,12)),
         tooltip=folium.Tooltip(tooltip_html, sticky=False, offset=(20, -10), parse_html=False),
     ).add_to(m)
+    _astro_mk_reg.append(f"window.__astroMk['{_k}']={_mk.get_name()};")
 
-# ── Vẽ marker được chọn SAU CÙNG → nằm trên cùng trong DOM stack của Leaflet ──
-# Leaflet gắn className của DivIcon trực tiếp lên thẻ .leaflet-marker-icon (chính
-# thẻ có inline z-index do Leaflet tự set theo vị trí lat). Dùng class riêng +
-# CSS !important để ép z-index của marker được chọn luôn cao nhất, không bị
-# các sao khác (kể cả ở lat thấp hơn → z-index Leaflet cao hơn) che mất.
-if _selected_marker_args:
-    _sel_coords, _sel_html, _sel_tooltip = _selected_marker_args
-    m.get_root().html.add_child(folium.Element("""
-        <style>
-            .selected-star-marker { z-index: 999999 !important; }
-        </style>
-    """))
-    _sel_marker = folium.Marker(
-        _sel_coords,
-        icon=folium.DivIcon(
-            html=_sel_html,
-            icon_size=(24,24), icon_anchor=(12,12),
-            class_name="selected-star-marker"),
-        tooltip=folium.Tooltip(_sel_tooltip, sticky=False, offset=(20, -10), parse_html=False),
-    ).add_to(m)
+_ASTRO_SEL_JS = """
+(function(){
+  // Bộ đếm số lần JS map được chạy (= số lần map bị dựng lại). Mở trang với ?astrodbg=1 để hiện badge góc map.
+  try {
+    var _P0 = window.parent; _P0.__astroMounts = (_P0.__astroMounts || 0) + 1;
+    if ((_P0.location.search || '').indexOf('astrodbg=1') >= 0) {
+      var _b = document.createElement('div');
+      _b.textContent = 'map mounts: ' + _P0.__astroMounts;
+      _b.style.cssText = 'position:absolute;right:6px;bottom:24px;z-index:99999;background:rgba(0,0,0,0.8);color:#4ade80;font:11px monospace;padding:2px 6px;border-radius:4px;pointer-events:none;';
+      document.body.appendChild(_b); window.__astroDbg = _b;
+    }
+  } catch (e) {}
+  window.__astroMk = {};
+  var _cm = null, _tipMk = null, _tipT = null;
+  function setStar(el, on){
+    var ic = el.closest ? el.closest('.leaflet-marker-icon') : null;
+    if (on) {
+      el.style.fontSize = '22px'; el.style.color = el.getAttribute('data-sc');
+      el.style.filter = el.getAttribute('data-sg') || 'none';
+      el.style.animation = 'star-pulse-sel 1.1s ease-in-out infinite';
+      el.style.transformOrigin = 'center'; el.style.display = 'inline-block';
+      el.style.position = 'relative'; el.style.zIndex = '10000';
+      if (ic) ic.classList.add('selected-star-marker');
+    } else {
+      el.style.fontSize = '16px'; el.style.color = el.getAttribute('data-nc'); el.style.filter = 'none';
+      el.style.animation = ''; el.style.display = ''; el.style.position = ''; el.style.zIndex = '';
+      if (ic) ic.classList.remove('selected-star-marker');
+    }
+  }
+  function apply(sel){
+    try {
+      if (!sel) return;
+      var key = sel.k || '';
+      if (window.__astroDbg) { window.__astroDbg.textContent = 'mounts: ' + window.parent.__astroMounts + ' | sel: ' + (key || 'free') + ' | apply#' + (window.__astroN = (window.__astroN || 0) + 1); }
+      var els = document.querySelectorAll('.astro-star');
+      for (var i = 0; i < els.length; i++) {
+        var on = !!key && els[i].getAttribute('data-k') === key;
+        if (on !== (els[i].getAttribute('data-on') === '1')) { setStar(els[i], on); els[i].setAttribute('data-on', on ? '1' : '0'); }
+      }
+      if (window.__astroLabel) window.__astroLabel(sel.name, sel.lat, sel.lon);
+      var map = __MAP__;
+      if (_cm) { try { map.removeLayer(_cm); } catch (e) {} _cm = null; }
+      if (!key) {
+        _cm = L.marker([sel.lat, sel.lon], {icon: L.divIcon({
+          html: '<div style="font-size:28px;line-height:1;filter:drop-shadow(0 0 6px rgba(255,50,50,0.9));cursor:pointer;">&#128205;</div>',
+          iconSize: [32, 32], iconAnchor: [10, 30], className: 'empty'})}).addTo(map);
+        _cm.bindTooltip('📍 ' + sel.name, {sticky: true});
+      }
+      var P = window.parent, tok = String(sel.tok || 0);
+      if (sel.tok && String(P.__astroTipTok || '') !== tok) {
+        P.__astroTipTok = tok;
+        if (window.matchMedia('(hover: none), (pointer: coarse)').matches) {
+          var mk = key ? window.__astroMk[key] : _cm;
+          if (mk) {
+            if (_tipT) clearTimeout(_tipT);
+            if (_tipMk && _tipMk !== mk) { try { _tipMk.closeTooltip(); } catch (e) {} }
+            setTimeout(function(){ try { mk.openTooltip(); } catch (e) {} }, 150);
+            _tipMk = mk;
+            _tipT = setTimeout(function(){ try { mk.closeTooltip(); } catch (e) {} }, (sel.sec || 15) * 1000);
+          }
+        }
+      }
+    } catch (e) {}
+  }
+  setTimeout(function(){
+    try { __REG__ } catch (e) {}
+    try {
+      var P = window.parent;
+      if (P.__astroSelH) { try { P.removeEventListener('astro-sel', P.__astroSelH); } catch (e1) {} }
+      var h = function(){ try { apply(P.__astroSel); } catch (e2) {} };
+      P.__astroSelH = h; P.addEventListener('astro-sel', h);
+      h(); setTimeout(h, 600); setTimeout(h, 1800);
+    } catch (e) {}
+  }, 60);
+})();
+"""
+class _AstroSelJS(MacroElement):
+    """JS chọn-địa-điểm chạy trong map. PHẢI là phần tử con của map (MacroElement có macro script):
+    streamlit-folium chỉ lấy JS từ m._children, KHÔNG lấy get_root().script."""
+    def __init__(self, js_body):
+        super().__init__()
+        self._name = '_AstroSelJS'
+        self._template = Template("{% macro script(this, kwargs) %}{{ this.js_body }}{% endmacro %}")
+        self.js_body = js_body
 
-# ── Touch (iPhone/Android): tooltip (ảnh + tên) tự hiện ~15s sau khi chạm vào ngôi sao ──
-# Lý do: chạm sao → Streamlit rerun → map được vẽ lại → tooltip mặc định biến mất ngay.
-# Giải pháp: sau khi map vẽ lại, mở tooltip của sao đang chọn rồi tự đóng sau _TIP_SECONDS giây.
-# Token (_tip_click_id) + sessionStorage đảm bảo chỉ hiện 1 lần cho mỗi lần click,
-# dù map có bị vẽ lại vì lý do khác (scan, AI ring...). Desktop không bị ảnh hưởng (hover như cũ).
-_TIP_SECONDS = 15
-_tip_tok = st.session_state.get("_tip_click_id", 0)
-if _tip_tok:
-    m.get_root().script.add_child(folium.Element(
-        "(function(){try{"
-        "if(!window.matchMedia('(hover: none), (pointer: coarse)').matches)return;"
-        "var tok='" + str(_tip_tok) + "';"
-        "try{if(sessionStorage.getItem('astroTipShown')===tok)return;sessionStorage.setItem('astroTipShown',tok);}catch(e){}"
-        "setTimeout(function(){try{var mk=" + _sel_marker.get_name() + ";mk.openTooltip();"
-        "setTimeout(function(){try{mk.closeTooltip();}catch(e){}}," + str(_TIP_SECONDS * 1000) + ");}catch(e){}},500);"
-        "}catch(e){}})();"
-    ))
+_AstroSelJS(_ASTRO_SEL_JS.replace("__MAP__", m.get_name()).replace("__REG__", "".join(_astro_mk_reg))).add_to(m)
 
 is_bookmark = any(abs(c[0]-st.session_state.lat)<0.001 and abs(c[1]-st.session_state.lon)<0.001
                   for c in LOCATION_DATABASE.values())
@@ -4314,19 +4346,35 @@ if _ai_ring_locs:
     _add_rings([(_n, (_la, _lo)) for _n, _la, _lo in _ai_ring_locs],
                "#67e8f9", "rgba(103,232,249,0.85)")
 
-if not is_bookmark:
-    folium.Marker(
-        [st.session_state.lat, st.session_state.lon],
-        icon=folium.DivIcon(
-            html='<div style="font-size:28px;line-height:1;filter:drop-shadow(0 0 6px rgba(255,50,50,0.9));cursor:pointer;">📍</div>',
-            icon_size=(32,32), icon_anchor=(10,30)),
-        tooltip=folium.Tooltip(f"📍 {_strip_loc_num(st.session_state.location_name)}", sticky=True)
-    ).add_to(m)
+# (ghim 📍 cho điểm tự do do JS trong map vẽ — xem _ASTRO_SEL_JS)
 
 # ── st_folium ─────────────────────────────────────────────────────────────────
 # QUAN TRỌNG: KHÔNG đưa "zoom"/"center" vào returned_objects.
 # Nếu có → mỗi pan/zoom map trả data về Python → Streamlit rerun → map refresh.
 # Chỉ return những gì cần xử lý click. Zoom/center được lưu qua _need_fly flag.
+# ── KHOÁ COMPONENT ỔN ĐỊNH: map chỉ bị tạo lại khi các đầu vào CẤU TRÚC của map đổi ───────────
+# streamlit-folium dùng hash của toàn bộ JS làm key component → bất kỳ thay đổi JS nào (kể cả ngoài ý muốn)
+# đều làm map reload. Ở đây hash chỉ gồm: tâm/zoom khởi tạo, tile, kết quả scan, vòng tròn AI.
+# Chọn sao / đổi địa điểm KHÔNG nằm trong đó (đã được JS trong map tự xử lý qua cầu nối __astroSel).
+st.session_state._astro_map_sig = repr((
+    st.session_state.map_center, st.session_state.zoom, st.session_state.map_tile,
+    repr(st.session_state.get("_scan_result")), repr(st.session_state.get("_ai_rings")),
+    st.session_state.get("_scan_best"), st.session_state.get("_scan_tonight"),
+))
+try:
+    import streamlit_folium as _stf
+    if not getattr(_stf, "_astro_hash_patched", False):
+        _orig_gjh = _stf.generate_js_hash
+        def _astro_gjh(js_string, key=None, return_on_hover=False):
+            _sig = st.session_state.get("_astro_map_sig")
+            if _sig is not None and key == "astro_map_main":
+                import hashlib as _hl
+                return _hl.sha256((str(_sig) + str(key) + str(return_on_hover)).encode()).hexdigest()
+            return _orig_gjh(js_string, key, return_on_hover)
+        _stf.generate_js_hash = _astro_gjh
+        _stf._astro_hash_patched = True
+except Exception:
+    pass
 _map_key = "astro_map_main"
 _stfolium_kwargs = dict(
     width='stretch', height=575, key=_map_key,
@@ -4684,6 +4732,18 @@ _mkw_comp.html("""<script>
 }catch(err){ console.log('[nc] error', err); }})();
 </script>""", height=0)
 
+# ── CẦU NỐI chọn địa điểm → JS trong map (không đổi HTML của map nên map không reload) ──
+_sel_key = next((f"{c[0]:.4f},{c[1]:.4f}" for c in LOCATION_DATABASE.values()
+                 if abs(c[0]-st.session_state.lat) < 0.001 and abs(c[1]-st.session_state.lon) < 0.001), "")
+import json as _json_sel
+_sel_payload = _json_sel.dumps({
+    "lat": round(float(st.session_state.lat), 5), "lon": round(float(st.session_state.lon), 5),
+    "k": _sel_key, "name": _strip_loc_num(str(st.session_state.location_name)),
+    "tok": st.session_state.get("_tip_click_id", 0), "sec": _TIP_SECONDS,
+}, ensure_ascii=False).replace("</", "<\\/")
+_mkw_comp.html("<script>(function(){try{var P=window.parent;P.__astroSel=" + _sel_payload
+               + ";P.dispatchEvent(new P.CustomEvent('astro-sel'));}catch(e){}})();</script>", height=0)
+
 # ── LPM EXTERNAL LINK ─────────────────────────────────────────────────────────
 # URL is used inline in the nav row beside the location selectbox
 _lpm_url = (f"https://lightpollutionmap.app/"
@@ -4789,7 +4849,6 @@ if map_data:
                 st.session_state._last_lc        = lc
                 st.session_state.lat             = bcoords[0]
                 st.session_state.lon             = bcoords[1]
-                st.session_state.map_center      = [bcoords[0], bcoords[1]]
                 st.session_state.location_name   = bname
                 st.session_state.is_custom_point = False
                 st.session_state._need_fly       = False
@@ -4816,7 +4875,6 @@ if map_data:
                 st.session_state._tip_click_id   = int(time.time() * 1000)
                 st.session_state.lat             = bcoords[0]
                 st.session_state.lon             = bcoords[1]
-                st.session_state.map_center      = [bcoords[0], bcoords[1]]
                 st.session_state.location_name   = bname
                 st.session_state.is_custom_point = False
                 st.session_state._last_tip       = None
@@ -4828,7 +4886,6 @@ if map_data:
             if abs(c_lat - st.session_state.lat) > 0.0001 or abs(c_lon - st.session_state.lon) > 0.0001:
                 st.session_state.lat             = c_lat
                 st.session_state.lon             = c_lon
-                st.session_state.map_center      = [c_lat, c_lon]
                 st.session_state.location_name   = fetch_location_name(c_lat, c_lon)
                 st.session_state.is_custom_point = True
                 st.session_state._last_tip       = None
